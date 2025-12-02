@@ -6,6 +6,7 @@
 import { Deal, DealStage } from '@otc-broker/core';
 import { DB } from '../database';
 import * as crypto from 'crypto';
+import { EventCategory, DEDUPE_WINDOWS, getEventFingerprint, categorizeEvent } from '../EventCategories';
 
 /**
  * Repository class for managing deals in the database.
@@ -153,13 +154,52 @@ export class DealRepository {
     });
   }
 
-  addEvent(dealId: string, msg: string): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO events (dealId, t, msg)
-      VALUES (?, ?, ?)
-    `);
+  /**
+   * Adds an event to the deal's audit trail with automatic deduplication.
+   * Events with the same fingerprint within the deduplication window will
+   * increment the occurrence count instead of creating duplicate records.
+   *
+   * @param dealId - Deal identifier
+   * @param msg - Event message
+   * @param category - Event category (auto-detected if not provided)
+   */
+  addEvent(dealId: string, msg: string, category?: EventCategory): void {
+    // Auto-categorize if not explicitly provided
+    const eventCategory = category ?? categorizeEvent(msg);
 
-    stmt.run(dealId, new Date().toISOString(), msg);
+    const fingerprint = getEventFingerprint(msg);
+    const dedupWindowSeconds = DEDUPE_WINDOWS[eventCategory];
+    const now = new Date().toISOString();
+
+    // Check if deduplication is enabled for this category
+    if (dedupWindowSeconds > 0) {
+      const cutoff = new Date(Date.now() - dedupWindowSeconds * 1000).toISOString();
+
+      // Look for duplicate event within time window
+      const existing: any = this.db.prepare(`
+        SELECT id FROM events
+        WHERE dealId = ? AND fingerprint = ? AND category = ? AND t > ?
+        ORDER BY t DESC LIMIT 1
+      `).get(dealId, fingerprint, eventCategory, cutoff);
+
+      if (existing) {
+        // Update existing event: increment occurrence count and update lastSeen
+        this.db.prepare(`
+          UPDATE events
+          SET occurrences = occurrences + 1,
+              lastSeen = ?,
+              t = ?
+          WHERE id = ?
+        `).run(now, now, existing.id);
+        return;
+      }
+    }
+
+    // Insert new event
+    this.db.prepare(`
+      INSERT INTO events (dealId, t, msg, category, occurrences, firstSeen, lastSeen, fingerprint)
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+    `).run(dealId, now, msg, eventCategory, now, now, fingerprint);
   }
 
   /**

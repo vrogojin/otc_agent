@@ -56,12 +56,17 @@ CREATE TABLE IF NOT EXISTS leases (
   expiresAt INTEGER NOT NULL
 );
 
--- Events / audit trail
+-- Events / audit trail with deduplication support
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   dealId TEXT NOT NULL,
-  t TEXT NOT NULL,
-  msg TEXT NOT NULL
+  t TEXT NOT NULL,  -- Primary timestamp (for backward compatibility)
+  msg TEXT NOT NULL,
+  category TEXT DEFAULT 'INFO',  -- Event category: STATE_CHANGE, TRANSIENT_ERROR, WARNING, INFO
+  occurrences INTEGER DEFAULT 1,  -- Number of times this event occurred
+  firstSeen TEXT,  -- When this event first occurred
+  lastSeen TEXT,  -- When this event last occurred (for deduplicated events)
+  fingerprint TEXT  -- Normalized message for deduplication matching
 );
 
 -- Notifications (idempotency)
@@ -91,4 +96,5 @@ CREATE INDEX IF NOT EXISTS idx_deposits_address ON escrow_deposits(address);
 CREATE INDEX IF NOT EXISTS idx_queue_deal ON queue_items(dealId);
 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue_items(status);
 CREATE INDEX IF NOT EXISTS idx_events_deal ON events(dealId);
+-- Note: idx_events_fingerprint is created by migration 011_add_events_deduplication.sql
 CREATE INDEX IF NOT EXISTS idx_leases_expiry ON leases(type, expiresAt);

@@ -727,13 +727,23 @@ export function renderDealDetailsPage(deal: Deal, balances: any): string {
                         </tr>
                       </thead>
                       <tbody>
-                        ${deal.events.map((event: { t: string; msg: string }) => `
+                        ${deal.events.map((event: any) => `
                           <tr>
                             <td style="border-color: #2a4563; font-family: 'Courier New', monospace; font-size: 12px; color: #a0a0a0;">
-                              ${formatDate(event.t)}
+                              ${formatDate(event.firstSeen || event.t)}
                             </td>
                             <td style="border-color: #2a4563; font-size: 13px;">
                               ${event.msg}
+                              ${event.occurrences && event.occurrences > 1 ? `
+                                <div style="margin-top: 6px;">
+                                  <span style="display: inline-block; padding: 2px 8px; background: #ff6b6b; color: #fff; border-radius: 12px; font-size: 11px; font-weight: bold;">
+                                    ${event.occurrences}× occurrences
+                                  </span>
+                                  <span style="margin-left: 10px; font-size: 11px; color: #a0a0a0;">
+                                    Last: ${formatDate(event.lastSeen)}
+                                  </span>
+                                </div>
+                              ` : ''}
                             </td>
                           </tr>
                         `).join('')}

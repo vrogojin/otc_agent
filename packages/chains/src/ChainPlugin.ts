@@ -33,6 +33,7 @@ export interface ChainConfig {
   database?: any;           // Optional database reference for persistence
   brokerAddress?: string;   // UnicitySwapBroker contract address (for EVM chains)
   etherscanApiKey?: string; // Etherscan API key for fetching transaction details (optional)
+  vestingCacheStore?: any;  // For Unicity: persistent cache for UTXO vesting classification
 }
 
 /**

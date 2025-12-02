@@ -35,9 +35,12 @@ npm run prod
 
 # Run database migrations
 npm run db:migrate
+
+# Setup admin user (for admin dashboard)
+npm run admin:setup --workspace=packages/backend
 ```
 
-### Testing & Quality
+### Testing & Quality (vitest)
 ```bash
 # Run all tests (all packages)
 npm test
@@ -54,6 +57,9 @@ npm test packages/core/test/specific-test.test.ts
 
 # Run tests in watch mode
 npm test -- --watch
+
+# Run specific test by name pattern (vitest)
+npm test -- --testNamePattern="commission"
 
 # Lint code
 npm run lint
@@ -152,6 +158,16 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA busy_timeout = 5000;
 ```
+
+### Chain Confirmation Thresholds
+Different chains require different confirmation counts for security:
+| Chain | collectConfirms | finalConfirms | Notes |
+|-------|-----------------|---------------|-------|
+| Unicity | 6 | 6 | UTXO-based, ~10 min blocks |
+| Ethereum | 3 | 12 | Account-based, ~12 sec blocks |
+| Polygon | 64 | 64 | Higher reorg risk |
+| Sepolia | 3 | 3 | Testnet |
+| BSC | 12 | 12 | Account-based |
 
 ## Critical Implementation Rules
 
@@ -273,7 +289,12 @@ POLYGON_CONFIRMATIONS=64
 POLYGON_COLLECT_CONFIRMS=64
 POLYGON_OPERATOR_ADDRESS=0x<operator-address>
 POLYGON_BROKER_ADDRESS=0x<deployed-broker-contract>
+
+# Block Explorer API Keys (Etherscan API V2)
+# Required for transaction status checking on EVM chains
+ETHERSCAN_API_KEY=<api-key>
 POLYGONSCAN_API_KEY=<api-key>
+BASESCAN_API_KEY=<api-key>
 
 # Sepolia Testnet Configuration (optional, for testing)
 SEPOLIA_RPC=https://eth-sepolia.g.alchemy.com/v2/<key>
@@ -307,20 +328,6 @@ All chain adapters must implement:
 - `estimateTransactionCost()`: Gas estimation
 - `getOracleQuote()`: USD pricing for commissions
 
-## Implementation Packets Order
-
-When implementing from scratch:
-1. Scaffold & DB runtime (monorepo, SQLite setup)
-2. Core types & invariants
-3. Chain plugin interface & Unicity adapter
-4. DAL & Migrations
-5. JSON-RPC & HTTP pages
-6. Engine v3 (locks+plan+queues)
-7. EVM plugin (ETH/Polygon)
-8. Solana plugin (optional)
-9. Notifications
-10. Simulators & E2E tests
-
 ## Testing Requirements
 
 E2E test scenarios that MUST pass:
@@ -338,11 +345,20 @@ E2E test scenarios that MUST pass:
 
 ### Decimal Handling (CRITICAL)
 - **NEVER use JavaScript floats for amounts** - use decimal.js exclusively via packages/core/src/decimal.ts
-- All amount calculations must use the `dec()` helper function
+- All amount calculations must use the decimal helper functions
 - Store amounts as strings in database and JSON to preserve precision
-- Use `dec.floor()` for commission calculations to avoid over-charging
+- Use `floorAmount()` for commission calculations to avoid over-charging
 - Asset amounts have specific decimal places (ETH: 18, USDC: 6, etc.) - respect these in calculations
-- Example: `dec(amount).times(0.003).floor().toFixed()` for 0.3% commission
+
+```typescript
+// Import from core package
+import { parseAmount, sumAmounts, floorAmount, calculateCommission } from '@otc-broker/core';
+
+// Examples
+const total = sumAmounts(['1.5', '2.3', '0.2']); // "4"
+const commission = calculateCommission('1000', 30, 6); // "3.000000" (0.3% of 1000)
+const floored = floorAmount('1.23456789', 4); // "1.2345"
+```
 
 ### Other Critical Constraints
 - Maintain idempotency at every boundary (plan, submit, notify)
@@ -455,12 +471,14 @@ npm test packages/backend/test/specific-test.test.ts
 ## Additional Documentation
 
 Important reference documents in the repository:
-- `ARCHITECTURE.md`: Detailed system architecture and data flow diagrams
+- `ARCHITECTURE.md`: **Start here for detailed system architecture**, data flow diagrams, and component interactions
 - `OTC_BROKER_BIGDOC_v1.0.md`: Original specification document
 - `QUICK_START.md`: Quick setup guide
 - `TODO.md`: Current development tasks and roadmap
 - `FUTURE_FEATURES.md`: Planned enhancements
 - `KEY_EXPORT_GUIDE.md`: Guide for exporting private keys from escrow addresses
 - `SECURITY_AUDIT_REPORT_OPERATOR_KEY.md`: Security audit findings
-- `contracts/README.md`: Detailed smart contract documentation
+- `contracts/README.md`: Detailed smart contract documentation and API reference
 - `ref_materials/`: Additional reference materials and documentation
+
+For understanding the deal lifecycle state machine, queue processing phases, and lock verification logic in depth, refer to `ARCHITECTURE.md`.
