@@ -247,7 +247,28 @@ CREATED → COLLECTION → WAITING → SWAP → CLOSED (or REVERTED)
 
 ## Environment Configuration
 
-Required environment variables (.env file):
+### Environment File Management
+
+The project uses multiple environment files for different deployment modes:
+
+| File | Purpose | Used By |
+|------|---------|---------|
+| `.env` | Active configuration (runtime) | `npm run dev`, `npm run prod` |
+| `.env.production` | Production settings template | `run-prod.sh` copies this to `.env` |
+| `.env.backup.dev` | Backup of dev `.env` | Created by `run-prod.sh`, restored on exit |
+
+**IMPORTANT**: The `run-prod.sh` script manages environment switching:
+1. Backs up current `.env` to `.env.backup.dev`
+2. Copies `.env.production` over `.env`
+3. Runs the production server
+4. Restores `.env.backup.dev` to `.env` on exit (via trap)
+
+**When making RPC endpoint or production config changes:**
+- Edit `.env.production` directly (not `.env`)
+- Changes to `.env` will be overwritten when `run-prod.sh` runs
+- The `.env` file is for development/local testing only
+
+### Required environment variables (.env file):
 ```bash
 # Server
 PORT=8080
