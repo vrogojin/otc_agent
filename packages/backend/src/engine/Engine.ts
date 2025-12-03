@@ -1728,12 +1728,19 @@ export class Engine {
         console.log(`[Engine] Processing phased queue item ${nextItem.id} (${currentPhase}: ${nextItem.purpose})`);
         await this.submitQueueItemAtomic(nextItem, deal);
       } catch (error: any) {
+        // Handle "already known" error gracefully - transaction is in mempool
+        if (error?.error?.message === 'already known' ||
+            error?.message?.includes('already known')) {
+          console.log(`[Engine] Transaction for ${nextItem.id} already in mempool, will retry on next tick`);
+          this.dealRepo.addEvent(deal.id, `${nextItem.purpose} already in mempool, waiting...`);
+          continue;
+        }
         console.error(`Failed to submit tx for queue item ${nextItem.id}:`, error);
         this.dealRepo.addEvent(deal.id, `Failed to submit ${nextItem.purpose}: ${error.message}`);
       }
     }
   }
-  
+
   private async processQueuesNormal(deal: Deal) {
     // Process non-phased items only (for account-based chains)
     const queues = this.queueRepo.getByDeal(deal.id)
@@ -1767,6 +1774,13 @@ export class Engine {
         console.log(`[Engine] Processing queue item ${nextItem.id} (${nextItem.purpose})`);
         await this.submitQueueItemAtomic(nextItem, deal);
       } catch (error: any) {
+        // Handle "already known" error gracefully - transaction is in mempool
+        if (error?.error?.message === 'already known' ||
+            error?.message?.includes('already known')) {
+          console.log(`[Engine] Transaction for ${nextItem.id} already in mempool, will retry on next tick`);
+          this.dealRepo.addEvent(deal.id, `${nextItem.purpose} already in mempool, waiting...`);
+          continue;
+        }
         console.error(`Failed to submit tx for queue item ${nextItem.id}:`, error);
         this.dealRepo.addEvent(deal.id, `Failed to submit ${nextItem.purpose}: ${error.message}`);
       }
@@ -2193,6 +2207,30 @@ export class Engine {
 
       console.log(`[BrokerSwap] Transaction submitted successfully: ${result.txid}`);
     } catch (error: any) {
+      // Handle "already known" error - transaction is already in mempool
+      // This can happen with RPC load balancing or retry logic
+      if (error?.error?.message === 'already known' ||
+          error?.message?.includes('already known')) {
+        console.log(`[BrokerSwap] Transaction already in mempool, checking on-chain state...`);
+
+        // Check if deal is already processed on-chain
+        if ('isDealProcessedOnChain' in plugin) {
+          const isProcessed = await (plugin as any).isDealProcessedOnChain(item.dealId);
+          if (isProcessed) {
+            console.log(`[BrokerSwap] Deal ${item.dealId.slice(0, 8)} already processed on-chain, marking complete`);
+            this.queueRepo.updateStatus(item.id, 'COMPLETED');
+            this.dealRepo.addEvent(deal.id, `Broker swap already processed on-chain`);
+            return;
+          }
+        }
+
+        // Transaction is in mempool but not yet confirmed - leave as PENDING
+        // Next tick will check on-chain state
+        console.log(`[BrokerSwap] Transaction in mempool, leaving as PENDING for next tick`);
+        this.dealRepo.addEvent(deal.id, `Broker swap in mempool (already known), waiting for confirmation`);
+        return;
+      }
+
       console.error(`[BrokerSwap] Failed to submit broker swap:`, error.message);
       this.dealRepo.addEvent(deal.id, `Broker swap failed: ${error.message}`);
       throw error;
@@ -2257,6 +2295,14 @@ export class Engine {
 
       console.log(`[BrokerRevert] Transaction submitted successfully: ${result.txid}`);
     } catch (error: any) {
+      // Handle "already known" error - transaction is already in mempool
+      if (error?.error?.message === 'already known' ||
+          error?.message?.includes('already known')) {
+        console.log(`[BrokerRevert] Transaction already in mempool, leaving as PENDING for next tick`);
+        this.dealRepo.addEvent(deal.id, `Broker revert in mempool (already known), waiting for confirmation`);
+        return;
+      }
+
       console.error(`[BrokerRevert] Failed to submit broker revert:`, error.message);
       this.dealRepo.addEvent(deal.id, `Broker revert failed: ${error.message}`);
       throw error;
@@ -2321,6 +2367,14 @@ export class Engine {
 
       console.log(`[BrokerRefund] Transaction submitted successfully: ${result.txid}`);
     } catch (error: any) {
+      // Handle "already known" error - transaction is already in mempool
+      if (error?.error?.message === 'already known' ||
+          error?.message?.includes('already known')) {
+        console.log(`[BrokerRefund] Transaction already in mempool, leaving as PENDING for next tick`);
+        this.dealRepo.addEvent(deal.id, `Broker refund in mempool (already known), waiting for confirmation`);
+        return;
+      }
+
       console.error(`[BrokerRefund] Failed to submit broker refund:`, error.message);
       this.dealRepo.addEvent(deal.id, `Broker refund failed: ${error.message}`);
       throw error;
