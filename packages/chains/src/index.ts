@@ -20,3 +20,4 @@ export * from './PluginManager';
 export * from './utils/UnicityKeyManager';
 export * from './utils/EtherscanAPI';
 export * from './utils/VestingTracer';
+export * from './utils/RPCCache';

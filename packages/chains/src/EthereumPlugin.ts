@@ -21,6 +21,7 @@ import ERC20_ABI from './abi/ERC20.json';
 import BROKER_ABI from './abi/UnicitySwapBroker.json';
 import { EtherscanAPI } from './utils/EtherscanAPI';
 import { deriveIndexFromDealId } from './utils/DealIndexDerivation';
+import { getGlobalRPCCache, RPCCache } from './utils/RPCCache';
 
 /**
  * Typed interface for UnicitySwapBroker contract methods.
@@ -111,8 +112,10 @@ export class EthereumPlugin implements ChainPlugin {
   private tankManager?: any; // Will be injected if gas funding is enabled
   private brokerContract?: IUnicitySwapBroker;
   private operatorWallet?: ethers.Wallet;
+  private rpcCache: RPCCache;
 
   constructor(config?: Partial<ChainConfig>) {
+    this.rpcCache = getGlobalRPCCache();
     this.chainId = config?.chainId || 'ETH';
   }
 
@@ -283,16 +286,17 @@ export class EthereumPlugin implements ChainPlugin {
     console.log(`[EthereumPlugin] listConfirmedDeposits called with asset: ${asset}, address: ${address}`);
     
     try {
-      const currentBlock = await this.provider.getBlockNumber();
-      
+      // Use cached block number (15s TTL) to reduce RPC calls
+      const currentBlock = await this.rpcCache.getBlockNumber(this.chainId, this.provider);
+
       // For native currency, fetch transaction history
       // Support both simple and fully qualified asset names
       const assetConfig = parseAssetCode(asset.split('@')[0] as AssetCode, this.chainId);
       const isNative = assetConfig?.native === true;
 
       if (isNative) {
-        // Get balance for total confirmation
-        const balance = await this.provider.getBalance(address);
+        // Get balance with caching (30s TTL)
+        const balance = await this.rpcCache.getBalance(this.chainId, address, this.provider);
         console.log(`[EthereumPlugin] Balance check for ${address} on ${this.chainId}: ${ethers.formatEther(balance)} (raw: ${balance})`);
         
         if (balance > 0n) {
@@ -424,20 +428,16 @@ export class EthereumPlugin implements ChainPlugin {
         }
         
         console.log(`[EthereumPlugin] Checking ERC20 token: ${tokenAddress} for address: ${address}`);
-        
+
         const contract = new ethers.Contract(tokenAddress, ERC20_ABI, this.provider);
-        let decimals = 18; // Default decimals
-        
+
+        // Get decimals with permanent caching (never changes)
+        const decimals = await this.rpcCache.getDecimals(this.chainId, tokenAddress, contract);
+        console.log(`[EthereumPlugin] Token decimals: ${decimals}`);
+
         try {
-          decimals = await contract.decimals();
-          console.log(`[EthereumPlugin] Token decimals: ${decimals}`);
-        } catch (error) {
-          console.warn(`[EthereumPlugin] Could not get decimals for token ${tokenAddress}, using default 18:`, error);
-        }
-        
-        try {
-          // Get current balance for total
-          const balance = await contract.balanceOf(address);
+          // Get current balance with caching (30s TTL)
+          const balance = await this.rpcCache.getERC20Balance(this.chainId, tokenAddress, address, contract);
           console.log(`[EthereumPlugin] ERC20 balance for ${address}: ${balance.toString()} (raw)`);
           
           if (balance > 0n) {
@@ -821,7 +821,8 @@ export class EthereumPlugin implements ChainPlugin {
         return 0;
       }
 
-      const currentBlock = await this.provider.getBlockNumber();
+      // Use cached block number for confirmation calculation
+      const currentBlock = await this.rpcCache.getBlockNumber(this.chainId, this.provider);
       const confirmations = currentBlock - receipt.blockNumber + 1;
 
       // Additional check: if receipt exists but confirmations are negative, it's a reorg
@@ -834,6 +835,146 @@ export class EthereumPlugin implements ChainPlugin {
       console.error(`Failed to get confirmations for ${txid}:`, error);
       // On error, assume transaction doesn't exist
       return -1;
+    }
+  }
+
+  /**
+   * Check if a transaction is stuck in mempool due to low gas price.
+   * Returns true if the transaction exists but has gas price below current network price.
+   *
+   * @param txid - Transaction hash to check
+   * @returns true if transaction is stuck, false if confirmed or not found
+   */
+  async isTransactionStuck(txid: string): Promise<boolean> {
+    try {
+      // First check if transaction is already in a block (has at least 1 confirmation)
+      // IMPORTANT: We must NOT bump gas for transactions that are already in a block,
+      // as they will eventually reach the required confirmation threshold.
+      const receipt = await this.provider.getTransactionReceipt(txid);
+      if (receipt) {
+        // Transaction is in a block (1+ confirmations), not stuck - just wait for more confirms
+        return false;
+      }
+
+      // Get the pending transaction
+      const tx = await this.provider.getTransaction(txid);
+      if (!tx) {
+        // Transaction doesn't exist (possibly dropped)
+        return false;
+      }
+
+      // Get current network gas prices
+      const feeData = await this.provider.getFeeData();
+      const currentBaseFee = feeData.maxFeePerGas;
+
+      if (!currentBaseFee) {
+        // Can't determine if stuck without base fee info
+        return false;
+      }
+
+      // Check if transaction gas price is below current base fee
+      // For EIP-1559 transactions, check maxFeePerGas
+      if (tx.maxFeePerGas !== null && tx.maxFeePerGas !== undefined) {
+        const isStuck = tx.maxFeePerGas < currentBaseFee;
+        if (isStuck) {
+          console.log(`[${this.chainId}] Transaction ${txid.slice(0, 10)}... is stuck:`, {
+            txMaxFeePerGas: ethers.formatUnits(tx.maxFeePerGas, 'gwei'),
+            currentBaseFee: ethers.formatUnits(currentBaseFee, 'gwei')
+          });
+        }
+        return isStuck;
+      }
+
+      // For legacy transactions, check gasPrice
+      if (tx.gasPrice !== null && tx.gasPrice !== undefined) {
+        const isStuck = tx.gasPrice < currentBaseFee;
+        if (isStuck) {
+          console.log(`[${this.chainId}] Transaction ${txid.slice(0, 10)}... is stuck (legacy):`, {
+            txGasPrice: ethers.formatUnits(tx.gasPrice, 'gwei'),
+            currentBaseFee: ethers.formatUnits(currentBaseFee, 'gwei')
+          });
+        }
+        return isStuck;
+      }
+
+      return false;
+    } catch (error) {
+      console.error(`[${this.chainId}] Error checking if transaction is stuck:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get current network gas prices for gas bumping calculations.
+   * Returns gas prices in gwei as strings for the Engine.
+   */
+  async getCurrentGasPrice(): Promise<{
+    gasPrice?: string;
+    maxFeePerGas?: string;
+    maxPriorityFeePerGas?: string;
+  }> {
+    const feeData = await this.provider.getFeeData();
+
+    return {
+      gasPrice: feeData.gasPrice
+        ? ethers.formatUnits(feeData.gasPrice, 'gwei')
+        : undefined,
+      maxFeePerGas: feeData.maxFeePerGas
+        ? ethers.formatUnits(feeData.maxFeePerGas, 'gwei')
+        : undefined,
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas
+        ? ethers.formatUnits(feeData.maxPriorityFeePerGas, 'gwei')
+        : undefined
+    };
+  }
+
+  /**
+   * Check if a deal has been processed on-chain by querying the broker contract directly.
+   * This is more reliable than tracking transaction confirmations because it checks
+   * the actual on-chain state regardless of which RPC node confirmed the transaction.
+   *
+   * IMPORTANT: This method queries the state at (currentBlock - requiredConfirmations)
+   * to ensure the transaction has enough confirmations and is safe from reorgs.
+   *
+   * @param dealId - The deal ID to check
+   * @returns true if the deal is marked as processed with sufficient confirmations
+   */
+  async isDealProcessedOnChain(dealId: string): Promise<boolean> {
+    if (!this.brokerContract) {
+      // No broker contract configured - can't verify on-chain state
+      return false;
+    }
+
+    try {
+      // Convert deal ID to bytes32 (keccak256 hash)
+      const dealIdBytes32 = ethers.id(dealId);
+
+      // Get current block and required confirmations
+      const currentBlock = await this.rpcCache.getBlockNumber(this.chainId, this.provider);
+      const requiredConfirms = this.getConfirmationThreshold();
+
+      // Query at a historical block to ensure sufficient confirmations
+      // If the deal was processed at (currentBlock - requiredConfirms), it's safe
+      const safeBlock = currentBlock - requiredConfirms;
+
+      if (safeBlock < 0) {
+        // Not enough blocks yet
+        return false;
+      }
+
+      // Query the processedDeals mapping at the safe block
+      const isProcessed = await (this.brokerContract as any).processedDeals(dealIdBytes32, {
+        blockTag: safeBlock
+      });
+
+      if (isProcessed) {
+        console.log(`[${this.chainId}] Deal ${dealId.slice(0, 8)}... is processed on-chain with ${requiredConfirms}+ confirmations`);
+      }
+
+      return isProcessed;
+    } catch (error) {
+      console.error(`[${this.chainId}] Error checking if deal is processed on-chain:`, error);
+      return false;
     }
   }
 
@@ -851,7 +992,8 @@ export class EthereumPlugin implements ChainPlugin {
     console.log(`[${this.chainId}] Checking blockchain for existing transfer:`, { from, to, asset, amount });
 
     try {
-      const currentBlock = await this.provider.getBlockNumber();
+      // Use cached block number for scan range
+      const currentBlock = await this.rpcCache.getBlockNumber(this.chainId, this.provider);
       const blocksToScan = 1000; // Scan last 1000 blocks
       const fromBlock = Math.max(0, currentBlock - blocksToScan);
 
@@ -926,7 +1068,8 @@ export class EthereumPlugin implements ChainPlugin {
         }
 
         const contract = new ethers.Contract(tokenAddress, ERC20_ABI, this.provider);
-        const decimals = await contract.decimals();
+        // Use cached decimals (permanent cache - never changes)
+        const decimals = await this.rpcCache.getDecimals(this.chainId, tokenAddress, contract);
         const expectedValue = ethers.parseUnits(amount, decimals);
 
         // Query Transfer events: from escrow -> to recipient
@@ -1029,8 +1172,8 @@ export class EthereumPlugin implements ChainPlugin {
       // Create contract instance
       const contract = new ethers.Contract(tokenAddress, ERC20_ABI, this.provider);
 
-      // Get decimals for amount formatting
-      const decimals = await contract.decimals();
+      // Get decimals with permanent caching (never changes)
+      const decimals = await this.rpcCache.getDecimals(this.chainId, tokenAddress, contract);
 
       // Query Transfer events to the recipient address
       // Transfer event: Transfer(address indexed from, address indexed to, uint256 value)
@@ -2173,7 +2316,8 @@ export class EthereumPlugin implements ChainPlugin {
    */
   private async discoverTokenContractsViaLogs(address: string): Promise<Set<string>> {
     try {
-      const currentBlock = await this.provider.getBlockNumber();
+      // Use cached block number
+      const currentBlock = await this.rpcCache.getBlockNumber(this.chainId, this.provider);
       const startBlock = Math.max(0, currentBlock - 500000);
 
       console.log(`[${this.chainId}] Scanning Transfer logs from block ${startBlock} to ${currentBlock}`);

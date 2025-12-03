@@ -583,14 +583,17 @@ export class RpcServer {
         ? sumAmounts([deal.alice.amount, commissionAmount, erc20Fee])
         : deal.alice.amount;
 
-      // Add gas buffer for native currency swaps on EVM chains
-      // When swapping native currency, the escrow pays gas from its own balance
-      // Gas estimates: ~150-200k gas for broker swap
-      // ETH at 30 gwei: 200k × 30 × 10^-9 = 0.006 ETH, with 2x buffer = 0.012 ETH
-      // POLYGON at 100 gwei: 200k × 100 × 10^-9 = 0.02 MATIC, with 2x buffer = 0.04 MATIC
+      // Add gas/fee buffer for native currency swaps
+      // - EVM chains: escrow pays gas from its own balance for broker swap
+      // - UTXO chains (Unicity): transaction fees consume from UTXO balance
       const isNative = !deal.alice.asset.startsWith('ERC20:') && !deal.alice.asset.startsWith('SPL:');
       const isEVM = ['ETH', 'POLYGON', 'BSC', 'BASE', 'SEPOLIA'].includes(deal.alice.chainId);
+      const isUTXO = deal.alice.chainId === 'UNICITY';
+
       if (isNative && isEVM) {
+        // EVM gas buffer: ~150-200k gas for broker swap
+        // ETH at 30 gwei: 200k × 30 × 10^-9 = 0.006 ETH, with 2x buffer = 0.012 ETH
+        // POLYGON at 100 gwei: 200k × 100 × 10^-9 = 0.02 MATIC, with 2x buffer = 0.04 MATIC
         const gasBuffers: Record<string, string> = {
           'ETH': '0.01',      // 0.01 ETH gas buffer (~$25-30 at current prices)
           'POLYGON': '0.05',  // 0.05 MATIC gas buffer (~$0.05 at current prices)
@@ -603,6 +606,13 @@ export class RpcServer {
           totalRequired = sumAmounts([totalRequired, gasBuffer]);
           console.log(`[RPC] Adding ${gasBuffer} gas buffer for native ${deal.alice.asset} swap on ${deal.alice.chainId}`);
         }
+      } else if (isUTXO) {
+        // UTXO fee buffer for Unicity: SWAP_PAYOUT consumes fees before OP_COMMISSION
+        // ~192 satoshis per TX × 2 TXs × 5x safety margin = ~0.00002 ALPHA
+        // Using same value as in invariants.ts checkLocks() function
+        const utxoFeeBuffer = '0.00002';
+        totalRequired = sumAmounts([totalRequired, utxoFeeBuffer]);
+        console.log(`[RPC] Adding ${utxoFeeBuffer} UTXO fee buffer for ${deal.alice.asset} on UNICITY`);
       }
 
       instructions.sideA.push({
@@ -653,11 +663,15 @@ export class RpcServer {
         ? sumAmounts([deal.bob.amount, commissionAmountB, erc20FeeB])
         : deal.bob.amount;
 
-      // Add gas buffer for native currency swaps on EVM chains
-      // When swapping native currency, the escrow pays gas from its own balance
+      // Add gas/fee buffer for native currency swaps
+      // - EVM chains: escrow pays gas from its own balance for broker swap
+      // - UTXO chains (Unicity): transaction fees consume from UTXO balance
       const isNativeB = !deal.bob.asset.startsWith('ERC20:') && !deal.bob.asset.startsWith('SPL:');
       const isEVMB = ['ETH', 'POLYGON', 'BSC', 'BASE', 'SEPOLIA'].includes(deal.bob.chainId);
+      const isUTXOB = deal.bob.chainId === 'UNICITY';
+
       if (isNativeB && isEVMB) {
+        // EVM gas buffer
         const gasBuffers: Record<string, string> = {
           'ETH': '0.01',      // 0.01 ETH gas buffer (~$25-30 at current prices)
           'POLYGON': '0.05',  // 0.05 MATIC gas buffer (~$0.05 at current prices)
@@ -670,6 +684,12 @@ export class RpcServer {
           totalRequiredB = sumAmounts([totalRequiredB, gasBuffer]);
           console.log(`[RPC] Adding ${gasBuffer} gas buffer for native ${deal.bob.asset} swap on ${deal.bob.chainId}`);
         }
+      } else if (isUTXOB) {
+        // UTXO fee buffer for Unicity: SWAP_PAYOUT consumes fees before OP_COMMISSION
+        // ~192 satoshis per TX × 2 TXs × 5x safety margin = ~0.00002 ALPHA
+        const utxoFeeBuffer = '0.00002';
+        totalRequiredB = sumAmounts([totalRequiredB, utxoFeeBuffer]);
+        console.log(`[RPC] Adding ${utxoFeeBuffer} UTXO fee buffer for ${deal.bob.asset} on UNICITY`);
       }
 
       instructions.sideB.push({
@@ -7623,7 +7643,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
   }
 
   /**
-   * Wait for transaction confirmation
+   * Wait for transaction confirmation with retry logic for RPC errors
    */
   private async waitForTxConfirmation(
     plugin: ChainPlugin,
@@ -7633,6 +7653,8 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
   ): Promise<void> {
     const startTime = Date.now();
     const maxWaitMs = maxWaitSeconds * 1000;
+    let consecutiveNotFoundCount = 0;
+    const maxConsecutiveNotFound = 3; // Only fail after 3 consecutive "not found" results
 
     while (Date.now() - startTime < maxWaitMs) {
       const confirmations = await plugin.getTxConfirmations(txid);
@@ -7642,7 +7664,17 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
       }
 
       if (confirmations < 0) {
-        throw new Error(`Transaction ${txid} was reorganized or not found`);
+        // Transaction not found - could be RPC issue or actual reorg
+        // Wait for multiple consecutive "not found" before giving up
+        consecutiveNotFoundCount++;
+        console.log(`[TxConfirmation] Transaction ${txid.slice(0, 10)}... not found (attempt ${consecutiveNotFoundCount}/${maxConsecutiveNotFound})`);
+
+        if (consecutiveNotFoundCount >= maxConsecutiveNotFound) {
+          throw new Error(`Transaction ${txid} was reorganized or not found after ${maxConsecutiveNotFound} attempts`);
+        }
+      } else {
+        // Transaction found (pending or partially confirmed) - reset counter
+        consecutiveNotFoundCount = 0;
       }
 
       // Wait 5 seconds before checking again

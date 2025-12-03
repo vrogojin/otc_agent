@@ -9,6 +9,15 @@ import { Deal, DealStage, EscrowDeposit } from './types';
 import { isAmountGte, sumAmounts, subtractAmounts } from './decimal';
 
 /**
+ * Fee buffer for UTXO-based chains (Unicity) when commission is paid from same asset as trade.
+ * The SWAP_PAYOUT transaction consumes fees from the escrow balance, leaving less
+ * available for the subsequent OP_COMMISSION transaction.
+ *
+ * Calculation: ~192 satoshis per TX × 2 TXs × 5x safety margin = ~0.00001 ALPHA
+ */
+const UNICITY_TX_FEE_BUFFER = '0.00001';
+
+/**
  * Result of checking whether sufficient funds are locked for a trade.
  * Contains both the lock status and the underlying deposit analysis.
  */
@@ -113,10 +122,11 @@ export function computeEligibleDeposits(
  * @param commissionAmount - Required commission amount
  * @param minConfirms - Minimum confirmations required
  * @param expiresAt - Deal expiration timestamp
+ * @param chainId - Optional chain ID for chain-specific fee buffer logic (e.g., UNICITY)
  * @returns Lock status including eligible deposits and collected amounts
  *
  * @example
- * const locks = checkLocks(deposits, 'ETH', '1.5', 'ETH', '0.0045', 12, expiresAt);
+ * const locks = checkLocks(deposits, 'ETH', '1.5', 'ETH', '0.0045', 12, expiresAt, 'ETH');
  * if (locks.tradeLocked && locks.commissionLocked) {
  *   // Proceed to WAITING stage
  * }
@@ -129,6 +139,7 @@ export function checkLocks(
   commissionAmount: string,
   minConfirms: number,
   expiresAt: string,
+  chainId?: string,
 ): LockEligibility {
   const eligible = computeEligibleDeposits(deposits, minConfirms, expiresAt);
   
@@ -166,11 +177,15 @@ export function checkLocks(
   let commissionLocked = false;
   if (commissionAsset === tradeAsset) {
     // Commission comes from surplus of trade asset
-    const totalNeeded = sumAmounts([tradeAmount, commissionAmount]);
+    // For UTXO chains (Unicity), add buffer for transaction fees that are consumed
+    // when executing SWAP_PAYOUT before OP_COMMISSION
+    const feeBuffer = chainId === 'UNICITY' ? UNICITY_TX_FEE_BUFFER : '0';
+    const totalNeeded = sumAmounts([tradeAmount, commissionAmount, feeBuffer]);
     commissionLocked = isAmountGte(tradeCollected, totalNeeded);
     console.log(`[checkLocks] Same-asset commission check:`, {
       tradeAmount,
       commissionAmount,
+      feeBuffer,
       totalNeeded,
       tradeCollected,
       commissionLocked

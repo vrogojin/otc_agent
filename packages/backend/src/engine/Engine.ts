@@ -56,6 +56,7 @@ export class Engine {
   private gasReimbursementCalculator: GasReimbursementCalculator;
   private gasPriceOracle: GasPriceOracle;
   private isProcessingQueues = false;  // Prevent concurrent queue processing
+  private isProcessingDeals = false;   // Prevent concurrent deal processing
   private queueProcessingInterval?: NodeJS.Timeout;
 
   constructor(
@@ -193,14 +194,21 @@ export class Engine {
   }
 
   private async processTick() {
+    // Prevent concurrent tick execution - if previous tick is still running, skip this one
+    if (this.isProcessingDeals) {
+      console.log('[Engine] Skipping tick - previous tick still processing');
+      return;
+    }
+
+    this.isProcessingDeals = true;
     try {
       // Monitor submitted transactions for confirmation
       await this.monitorSubmittedTransactions();
-      
+
       // Get active deals
       const activeDeals = this.dealRepo.getActiveDeals();
       console.log(`[Engine] Processing ${activeDeals.length} active deals`);
-      
+
       for (const deal of activeDeals) {
         console.log(`[Engine] Processing deal ${deal.id} in stage ${deal.stage}`);
 
@@ -216,6 +224,8 @@ export class Engine {
       }
     } catch (error) {
       console.error('Engine tick error:', error);
+    } finally {
+      this.isProcessingDeals = false;
     }
   }
 
@@ -358,16 +368,28 @@ export class Engine {
           if (queueItem.status === 'SUBMITTED' && queueItem.submittedTx) {
             // Check confirmation status
             const plugin = this.pluginManager.getPlugin(queueItem.chainId);
-            
+
             // Get current confirmation count
             const currentConfirms = await plugin.getTxConfirmations(queueItem.submittedTx.txid);
             const requiredConfirms = queueItem.submittedTx.requiredConfirms;
-            
+
             if (currentConfirms === -1) {
+              // Transaction disappeared - check on-chain state for BROKER_SWAP
+              // The tx might have confirmed via a different RPC path
+              if (queueItem.purpose === 'BROKER_SWAP' && 'isDealProcessedOnChain' in plugin) {
+                const isProcessed = await (plugin as any).isDealProcessedOnChain(deal.id);
+                if (isProcessed) {
+                  console.log(`[Engine] BROKER_SWAP tx disappeared but deal is processed on-chain - marking complete`);
+                  this.queueRepo.updateStatus(queueItem.id, 'COMPLETED', queueItem.submittedTx);
+                  this.dealRepo.addEvent(deal.id, `${queueItem.purpose} verified on-chain (tx tracking lost)`);
+                  continue;
+                }
+              }
+
               // Transaction disappeared due to reorg!
               console.error(`[REORG] Transaction ${queueItem.submittedTx.txid} disappeared from chain!`);
               this.dealRepo.addEvent(deal.id, `REORG: ${queueItem.purpose} tx disappeared, resubmitting`);
-              
+
               // Reset to PENDING for resubmission
               this.queueRepo.updateStatus(queueItem.id, 'PENDING');
               allConfirmed = false;
@@ -375,10 +397,36 @@ export class Engine {
               this.queueRepo.updateStatus(queueItem.id, 'COMPLETED', queueItem.submittedTx);
               this.dealRepo.addEvent(deal.id, `${queueItem.purpose} confirmed: ${queueItem.submittedTx.txid}`);
             } else {
+              // Still waiting for confirmations - but also check on-chain state for BROKER_SWAP
+              // This catches cases where the tx confirmed but our RPC node doesn't see it
+              if (queueItem.purpose === 'BROKER_SWAP' && 'isDealProcessedOnChain' in plugin) {
+                const isProcessed = await (plugin as any).isDealProcessedOnChain(deal.id);
+                if (isProcessed) {
+                  console.log(`[Engine] BROKER_SWAP shows 0 confirms but deal is processed on-chain - marking complete`);
+                  this.queueRepo.updateStatus(queueItem.id, 'COMPLETED', queueItem.submittedTx);
+                  this.dealRepo.addEvent(deal.id, `${queueItem.purpose} verified on-chain (confirms=${currentConfirms})`);
+                  continue;
+                }
+              }
+
               allConfirmed = false;
               console.log(`[Engine] Waiting for confirmations on ${queueItem.submittedTx.txid} (${currentConfirms}/${requiredConfirms})`);
             }
           } else if (queueItem.status === 'PENDING') {
+            // For PENDING BROKER_SWAP items, check if already processed on-chain
+            // This handles cases where tx was submitted but tracking was lost
+            if (queueItem.purpose === 'BROKER_SWAP') {
+              const plugin = this.pluginManager.getPlugin(queueItem.chainId);
+              if ('isDealProcessedOnChain' in plugin) {
+                const isProcessed = await (plugin as any).isDealProcessedOnChain(deal.id);
+                if (isProcessed) {
+                  console.log(`[Engine] PENDING BROKER_SWAP but deal already processed on-chain - marking complete`);
+                  this.queueRepo.updateStatus(queueItem.id, 'COMPLETED');
+                  this.dealRepo.addEvent(deal.id, `${queueItem.purpose} already processed on-chain`);
+                  continue;
+                }
+              }
+            }
             allConfirmed = false;
           }
         }
@@ -543,7 +591,8 @@ export class Engine {
         commissionAsset,
         commissionAmount,
         lockMinConf,  // Use proper threshold for locks
-        expiresAt
+        expiresAt,
+        deal.alice.chainId  // Pass chainId for UTXO fee buffer logic
       );
       
       console.log(`[Engine] Lock check for Alice:`, {
@@ -693,7 +742,8 @@ export class Engine {
         commissionAsset,
         commissionAmount,
         lockMinConfB,  // Use proper threshold for locks
-        expiresAtB
+        expiresAtB,
+        deal.bob.chainId  // Pass chainId for UTXO fee buffer logic
       );
       
       console.log(`[Engine] Lock check for Bob:`, {
@@ -911,6 +961,14 @@ export class Engine {
   }
 
   private async buildTransferPlan(deal: Deal) {
+    // Defense-in-depth: Check if queue items already exist for this deal
+    // This prevents duplicate plans even if concurrent execution somehow bypasses the guard
+    const existingItems = this.queueRepo.getByDeal(deal.id);
+    if (existingItems.length > 0) {
+      console.log(`[Engine] Transfer plan already exists for deal ${deal.id} (${existingItems.length} items), skipping`);
+      return;
+    }
+
     console.log(`[Engine] Building transfer plan for deal ${deal.id}`);
     console.log(`[Engine] Deal structure:`, {
       alice: deal.alice,
@@ -920,7 +978,7 @@ export class Engine {
       aliceDetails: !!deal.aliceDetails,
       bobDetails: !!deal.bobDetails
     });
-    
+
     this.db.runInTransaction(() => {
       // Calculate commissions first (needed for both broker and non-broker paths)
       const sideACommission = this.calculateCommissionAmount(deal, 'A');
