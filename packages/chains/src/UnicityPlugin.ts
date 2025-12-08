@@ -14,6 +14,78 @@ import { deriveIndexFromDealId } from './utils/DealIndexDerivation';
 import { VestingTracer, VestingCacheStore } from './utils/VestingTracer';
 
 /**
+ * Log throttler to prevent excessive error logging.
+ * Uses a sliding window to limit log frequency per error type.
+ */
+class LogThrottler {
+  private lastLogTime: Map<string, number> = new Map();
+  private logCounts: Map<string, number> = new Map();
+  private readonly windowMs: number;
+  private readonly maxLogsPerWindow: number;
+
+  constructor(windowMs: number = 60000, maxLogsPerWindow: number = 3) {
+    this.windowMs = windowMs;
+    this.maxLogsPerWindow = maxLogsPerWindow;
+  }
+
+  /**
+   * Check if a log message should be emitted.
+   * Returns true if the message should be logged, false if throttled.
+   */
+  shouldLog(key: string): boolean {
+    const now = Date.now();
+    const lastTime = this.lastLogTime.get(key) || 0;
+    const count = this.logCounts.get(key) || 0;
+
+    // Reset window if enough time has passed
+    if (now - lastTime > this.windowMs) {
+      this.lastLogTime.set(key, now);
+      this.logCounts.set(key, 1);
+      return true;
+    }
+
+    // Within window - check count
+    if (count < this.maxLogsPerWindow) {
+      this.logCounts.set(key, count + 1);
+      return true;
+    }
+
+    // Throttled - emit suppression notice on first suppression
+    if (count === this.maxLogsPerWindow) {
+      this.logCounts.set(key, count + 1);
+      console.log(`[LogThrottler] Suppressing further '${key}' messages for ${Math.round((this.windowMs - (now - lastTime)) / 1000)}s`);
+    }
+
+    return false;
+  }
+
+  /**
+   * Log an error with throttling.
+   */
+  error(key: string, message: string, error?: any): void {
+    if (this.shouldLog(key)) {
+      if (error) {
+        console.error(message, error.message || error);
+      } else {
+        console.error(message);
+      }
+    }
+  }
+
+  /**
+   * Log a warning with throttling.
+   */
+  warn(key: string, message: string): void {
+    if (this.shouldLog(key)) {
+      console.warn(message);
+    }
+  }
+}
+
+// Global throttler instance for Electrum errors (60 second window, max 3 logs)
+const electrumThrottler = new LogThrottler(60000, 3);
+
+/**
  * Electrum protocol request structure.
  */
 interface ElectrumRequest {
@@ -75,6 +147,11 @@ export class UnicityPlugin implements ChainPlugin {
   private database?: any;
   private vestingTracer?: VestingTracer;
 
+  // Exponential backoff for reconnection
+  private reconnectAttempts = 0;
+  private readonly maxReconnectDelay = 300000; // 5 minutes max
+  private readonly baseReconnectDelay = 5000; // 5 seconds base
+
   async init(cfg: ChainConfig): Promise<void> {
     this.config = cfg;
     this.database = cfg.database;
@@ -128,20 +205,41 @@ export class UnicityPlugin implements ChainPlugin {
             }
           }
         } catch (error) {
-          console.error('Failed to parse Electrum response:', error);
+          electrumThrottler.error('electrum-parse', 'Failed to parse Electrum response:', error);
         }
       });
 
       this.ws.on('error', (error) => {
         this.connected = false;
-        console.error('Electrum WebSocket error:', error);
+        electrumThrottler.error('electrum-ws-error', 'Electrum WebSocket error:', error);
         reject(error);
       });
 
       this.ws.on('close', () => {
         this.connected = false;
-        // Auto-reconnect after 5 seconds
-        setTimeout(() => this.connect().catch(console.error), 5000);
+        // Calculate exponential backoff delay
+        this.reconnectAttempts++;
+        const delay = Math.min(
+          this.baseReconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 6)), // Cap exponent at 6 (320s)
+          this.maxReconnectDelay
+        );
+
+        if (electrumThrottler.shouldLog('electrum-reconnect-schedule')) {
+          console.log(`[UnicityPlugin] Connection closed, reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})`);
+        }
+
+        // Auto-reconnect with exponential backoff
+        setTimeout(() => {
+          this.connect()
+            .then(() => {
+              // Reset backoff on successful connection
+              this.reconnectAttempts = 0;
+              console.log('[UnicityPlugin] Reconnected to Electrum successfully');
+            })
+            .catch((err) => {
+              electrumThrottler.error('electrum-reconnect', 'Electrum reconnection failed:', err);
+            });
+        }, delay);
       });
     });
   }
@@ -372,7 +470,7 @@ export class UnicityPlugin implements ChainPlugin {
     
     // Ensure connection
     if (!this.connected || this.ws?.readyState !== WebSocket.OPEN) {
-      console.warn('[UnicityPlugin] Not connected to Electrum, attempting reconnect...');
+      electrumThrottler.warn('electrum-reconnect-attempt', '[UnicityPlugin] Not connected to Electrum, attempting reconnect...');
       await this.connect();
     }
 
@@ -479,7 +577,8 @@ export class UnicityPlugin implements ChainPlugin {
       updatedAt: new Date().toISOString(),
     };
     } catch (error) {
-      console.error(`[UnicityPlugin] Error in listConfirmedDeposits:`, error);
+      // Throttle deposit listing errors - can spam during Electrum outages
+      electrumThrottler.error('electrum-deposits', `[UnicityPlugin] Error in listConfirmedDeposits for ${address.slice(0, 15)}...:`, error);
       // Return empty result on error
       return {
         address,
@@ -810,7 +909,8 @@ export class UnicityPlugin implements ChainPlugin {
 
       return tx.confirmations;
     } catch (error) {
-      console.error(`Failed to get confirmations for ${txid}:`, error);
+      // Throttle confirmation check errors - these can spam during Electrum outages
+      electrumThrottler.error('electrum-confirmations', `Failed to get confirmations for ${txid.slice(0, 10)}...:`, error);
       return 0;
     }
   }
