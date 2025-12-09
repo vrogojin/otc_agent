@@ -962,7 +962,7 @@ export class RpcServer {
   }
 
   private async cancelDeal(params: { dealId: string; token: string }) {
-    // Verify token
+    // Verify token and get deal
     const deal = this.dealRepo.get(params.dealId);
     if (!deal) {
       throw new Error('Deal not found');
@@ -973,9 +973,11 @@ export class RpcServer {
       throw new Error('Cannot cancel deal - deal has already started or been finalized');
     }
 
-    // Update deal stage to REVERTED
-    deal.stage = 'REVERTED';
-    this.dealRepo.update(deal);
+    // Use updateStage which is transaction-safe (wraps in runInTransaction)
+    // This ensures the stage change is atomically persisted to the database
+    this.dealRepo.updateStage(deal.id, 'REVERTED');
+
+    // Add cancellation-specific event (updateStage already adds "Stage changed to REVERTED")
     this.dealRepo.addEvent(deal.id, 'Deal cancelled by party');
 
     return { ok: true };
