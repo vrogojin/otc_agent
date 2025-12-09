@@ -50,10 +50,10 @@ export class QueueRepository {
     
     if (item.purpose === 'SWAP_PAYOUT') {
       const existingRefunds = this.getByDeal(item.dealId)
-        .filter(q => q.purpose === 'TIMEOUT_REFUND' && 
+        .filter(q => q.purpose === 'TIMEOUT_REFUND' &&
                      q.from.address === item.from.address &&
                      q.asset === item.asset);
-      
+
       // Only block if there are any refunds (swaps shouldn't happen after refunds)
       if (existingRefunds.length > 0) {
         console.error(`[CRITICAL] Blocked SWAP_PAYOUT for deal ${item.dealId} - TIMEOUT_REFUND exists!`);
@@ -62,7 +62,33 @@ export class QueueRepository {
         throw new Error(`Cannot create swap - refund already exists for ${item.asset}`);
       }
     }
-    
+
+    // CRITICAL SAFEGUARD #7: Prevent duplicate BROKER_REFUND items for the same escrow+asset
+    // This prevents race conditions where multiple engine ticks detect the same late deposit
+    if (item.purpose === 'BROKER_REFUND') {
+      const existingBrokerRefundsStmt = this.db.prepare(`
+        SELECT id, status FROM queue_items
+        WHERE purpose = 'BROKER_REFUND'
+          AND fromAddr = ?
+          AND asset = ?
+          AND status IN ('PENDING', 'SUBMITTED', 'COMPLETED')
+      `);
+      const existingBrokerRefunds = existingBrokerRefundsStmt.all(item.from.address, item.asset) as any[];
+
+      if (existingBrokerRefunds.length > 0) {
+        console.log(`[QueueRepo] Skipping duplicate BROKER_REFUND for ${item.asset} from ${item.from.address}`);
+        console.log(`  Existing items: ${existingBrokerRefunds.map((r: any) => `${r.id.slice(0,8)}:${r.status}`).join(', ')}`);
+        // Return a dummy item to indicate it was deduplicated (don't throw - this is expected)
+        return {
+          ...item,
+          id: 'deduplicated',
+          seq: 0,
+          status: 'COMPLETED',
+          createdAt: new Date().toISOString(),
+        } as QueueItem;
+      }
+    }
+
     // Get next sequence number for this deal+sender
     const seqStmt = this.db.prepare(`
       SELECT COALESCE(MAX(seq), 0) + 1 as nextSeq
