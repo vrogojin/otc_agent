@@ -281,6 +281,14 @@ export interface QueueItem {
   originalNonce?: number;
   /** Last gas price used (in gwei for EVM chains) */
   lastGasPrice?: string;
+
+  // Confirmation check tracking (for stuck SUBMITTED detection)
+  /** Number of consecutive confirmation check errors */
+  confirmCheckErrors?: number;
+  /** ISO timestamp of last confirmation check attempt */
+  lastConfirmCheckAt?: string;
+  /** Last confirmation check error message */
+  confirmCheckError?: string;
 }
 
 /**

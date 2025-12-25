@@ -393,6 +393,17 @@ export class QueueRepository {
       item.lastGasPrice = row.lastGasPrice;
     }
 
+    // Add confirmation check metadata only if present
+    if (row.confirmCheckErrors !== undefined && row.confirmCheckErrors !== null) {
+      item.confirmCheckErrors = row.confirmCheckErrors;
+    }
+    if (row.lastConfirmCheckAt) {
+      item.lastConfirmCheckAt = row.lastConfirmCheckAt;
+    }
+    if (row.confirmCheckError) {
+      item.confirmCheckError = row.confirmCheckError;
+    }
+
     return item;
   }
 
@@ -505,5 +516,93 @@ export class QueueRepository {
       duplicates,
       nonces
     };
+  }
+
+  /**
+   * Update confirmation check status for a queue item.
+   * Used for tracking stuck SUBMITTED items and escalation.
+   * @param id - Queue item ID
+   * @param status - Confirmation check status
+   */
+  updateConfirmCheckStatus(id: string, status: {
+    confirmCheckErrors: number;
+    lastConfirmCheckAt: string;
+    confirmCheckError: string | null;
+  }): void {
+    const stmt = this.db.prepare(`
+      UPDATE queue_items
+      SET confirmCheckErrors = ?,
+          lastConfirmCheckAt = ?,
+          confirmCheckError = ?
+      WHERE id = ?
+    `);
+
+    stmt.run(
+      status.confirmCheckErrors,
+      status.lastConfirmCheckAt,
+      status.confirmCheckError,
+      id
+    );
+  }
+
+  /**
+   * Reset a SUBMITTED item to PENDING for retry.
+   * Clears submission data and resets tracking counters.
+   * @param id - Queue item ID
+   * @param reason - Reason for reset (stored in confirmCheckError for debugging)
+   */
+  resetForRetry(id: string, reason: string): void {
+    const stmt = this.db.prepare(`
+      UPDATE queue_items
+      SET status = 'PENDING',
+          submittedTx = NULL,
+          confirmCheckErrors = 0,
+          lastConfirmCheckAt = NULL,
+          confirmCheckError = ?,
+          gasBumpAttempts = 0,
+          lastSubmitAt = NULL,
+          originalNonce = NULL,
+          lastGasPrice = NULL
+      WHERE id = ?
+    `);
+
+    stmt.run(`RESET: ${reason}`, id);
+  }
+
+  /**
+   * Get items stuck in SUBMITTED status beyond threshold.
+   * @param thresholdMs - Time threshold in milliseconds
+   * @returns Queue items that have been SUBMITTED longer than threshold
+   */
+  getStuckSubmittedItems(thresholdMs: number): QueueItem[] {
+    const cutoffTime = new Date(Date.now() - thresholdMs).toISOString();
+
+    const stmt = this.db.prepare(`
+      SELECT * FROM queue_items
+      WHERE status = 'SUBMITTED'
+        AND submittedTx IS NOT NULL
+        AND json_extract(submittedTx, '$.submittedAt') < ?
+      ORDER BY createdAt ASC
+    `);
+
+    const rows = stmt.all(cutoffTime) as any[];
+    return rows.map(row => this.mapRowToQueueItem(row));
+  }
+
+  /**
+   * Get items with persistent confirmation check errors.
+   * @param errorThreshold - Minimum number of consecutive errors
+   * @returns Queue items with errors above threshold
+   */
+  getItemsWithConfirmErrors(errorThreshold: number): QueueItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM queue_items
+      WHERE status = 'SUBMITTED'
+        AND confirmCheckErrors >= ?
+      ORDER BY confirmCheckErrors DESC
+    `);
+
+    const rows = stmt.all(errorThreshold) as any[];
+    return rows.map(row => this.mapRowToQueueItem(row));
   }
 }

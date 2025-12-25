@@ -530,7 +530,11 @@ export class RecoveryManager {
       WHERE status = 'SUBMITTED'
         AND submittedTx IS NOT NULL
         AND lastSubmitAt < ?
-        AND purpose IN ('BROKER_SWAP', 'PHASE_1_SWAP')
+        AND purpose IN (
+          'BROKER_SWAP', 'BROKER_REVERT', 'BROKER_REFUND',
+          'SWAP_PAYOUT', 'OP_COMMISSION', 'TIMEOUT_REFUND',
+          'GAS_REFUND_TO_TANK', 'SURPLUS_REFUND', 'GAS_REIMBURSEMENT'
+        )
         AND (lastRecoveryAt IS NULL OR lastRecoveryAt < ?)
       ORDER BY seq ASC
       LIMIT 5
