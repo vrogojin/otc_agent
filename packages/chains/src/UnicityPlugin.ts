@@ -12,78 +12,10 @@ import { generateDeterministicKey, deriveChildPrivateKey, privateKeyToAddress } 
 import { buildAndSignSegWitTransaction, selectUTXOs, UTXO } from './utils/UnicityTransaction';
 import { deriveIndexFromDealId } from './utils/DealIndexDerivation';
 import { VestingTracer, VestingCacheStore } from './utils/VestingTracer';
-
-/**
- * Log throttler to prevent excessive error logging.
- * Uses a sliding window to limit log frequency per error type.
- */
-class LogThrottler {
-  private lastLogTime: Map<string, number> = new Map();
-  private logCounts: Map<string, number> = new Map();
-  private readonly windowMs: number;
-  private readonly maxLogsPerWindow: number;
-
-  constructor(windowMs: number = 60000, maxLogsPerWindow: number = 3) {
-    this.windowMs = windowMs;
-    this.maxLogsPerWindow = maxLogsPerWindow;
-  }
-
-  /**
-   * Check if a log message should be emitted.
-   * Returns true if the message should be logged, false if throttled.
-   */
-  shouldLog(key: string): boolean {
-    const now = Date.now();
-    const lastTime = this.lastLogTime.get(key) || 0;
-    const count = this.logCounts.get(key) || 0;
-
-    // Reset window if enough time has passed
-    if (now - lastTime > this.windowMs) {
-      this.lastLogTime.set(key, now);
-      this.logCounts.set(key, 1);
-      return true;
-    }
-
-    // Within window - check count
-    if (count < this.maxLogsPerWindow) {
-      this.logCounts.set(key, count + 1);
-      return true;
-    }
-
-    // Throttled - emit suppression notice on first suppression
-    if (count === this.maxLogsPerWindow) {
-      this.logCounts.set(key, count + 1);
-      console.log(`[LogThrottler] Suppressing further '${key}' messages for ${Math.round((this.windowMs - (now - lastTime)) / 1000)}s`);
-    }
-
-    return false;
-  }
-
-  /**
-   * Log an error with throttling.
-   */
-  error(key: string, message: string, error?: any): void {
-    if (this.shouldLog(key)) {
-      if (error) {
-        console.error(message, error.message || error);
-      } else {
-        console.error(message);
-      }
-    }
-  }
-
-  /**
-   * Log a warning with throttling.
-   */
-  warn(key: string, message: string): void {
-    if (this.shouldLog(key)) {
-      console.warn(message);
-    }
-  }
-}
+import { LogThrottler, createErrorThrottler } from './utils/LogThrottler';
 
 // Global throttler instance for Electrum errors (60 second window, max 3 logs)
-const electrumThrottler = new LogThrottler(60000, 3);
+const electrumThrottler = createErrorThrottler();
 
 /**
  * Electrum protocol request structure.

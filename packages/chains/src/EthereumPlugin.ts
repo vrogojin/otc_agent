@@ -22,6 +22,10 @@ import BROKER_ABI from './abi/UnicitySwapBroker.json';
 import { EtherscanAPI } from './utils/EtherscanAPI';
 import { deriveIndexFromDealId } from './utils/DealIndexDerivation';
 import { getGlobalRPCCache, RPCCache } from './utils/RPCCache';
+import { LogThrottler, createErrorThrottler } from './utils/LogThrottler';
+
+// Throttler for RPC errors to avoid log spam
+const rpcErrorThrottler = createErrorThrottler();
 
 /**
  * Typed interface for UnicitySwapBroker contract methods.
@@ -114,6 +118,15 @@ export class EthereumPlugin implements ChainPlugin {
   private operatorWallet?: ethers.Wallet;
   private rpcCache: RPCCache;
 
+  // Exponential backoff for reconnection
+  private reconnectAttempts = 0;
+  private readonly maxReconnectDelay = 300000; // 5 minutes max
+  private readonly baseReconnectDelay = 5000; // 5 seconds base
+  private readonly maxReconnectAttempts = 10; // Give up after 10 attempts (will retry on next health check)
+  private reconnecting = false;
+  private consecutiveFailures = 0;
+  private readonly failureThreshold = 3; // Trigger reconnect after 3 consecutive failures
+
   constructor(config?: Partial<ChainConfig>) {
     this.rpcCache = getGlobalRPCCache();
     this.chainId = config?.chainId || 'ETH';
@@ -193,6 +206,136 @@ export class EthereumPlugin implements ChainPlugin {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
+    }
+  }
+
+  /**
+   * Reconnect to the RPC endpoint with a fresh provider.
+   * Creates a new provider instance and replaces the existing one.
+   * Also re-attaches wallets and clears the RPC cache for this chain.
+   */
+  async reconnect(): Promise<void> {
+    if (this.reconnecting) {
+      console.log(`[${this.chainId}] Reconnection already in progress`);
+      return;
+    }
+
+    this.reconnecting = true;
+    this.reconnectAttempts++;
+
+    try {
+      const rpcUrl = this.config.rpcUrl || 'https://ethereum-rpc.publicnode.com';
+
+      // Calculate exponential backoff delay
+      const delay = Math.min(
+        this.baseReconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 6)), // Cap exponent at 6 (320s)
+        this.maxReconnectDelay
+      );
+
+      if (rpcErrorThrottler.shouldLog(`${this.chainId}-reconnect`)) {
+        console.log(`[${this.chainId}] Attempting reconnection (attempt ${this.reconnectAttempts}) after ${Math.round(delay / 1000)}s delay`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+
+      // Create a new provider
+      const newProvider = new ethers.JsonRpcProvider(rpcUrl, undefined, {
+        staticNetwork: true
+      });
+
+      // Test the new connection
+      await Promise.race([
+        newProvider.getBlockNumber(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Connection test timeout')), 10000))
+      ]);
+
+      // Replace the provider
+      this.provider = newProvider;
+
+      // Re-attach operator wallet to new provider
+      if (this.operatorWallet && this.config.operatorPrivateKey) {
+        this.operatorWallet = new ethers.Wallet(this.config.operatorPrivateKey, this.provider);
+      }
+
+      // Re-initialize broker contract with new provider
+      if (this.config.brokerAddress) {
+        this.brokerContract = new ethers.Contract(this.config.brokerAddress, BROKER_ABI, this.provider) as unknown as IUnicitySwapBroker;
+      }
+
+      // Update Etherscan API with new provider
+      if (this.etherscanAPI) {
+        this.etherscanAPI = new EtherscanAPI(this.chainId, this.config.etherscanApiKey, this.provider);
+      }
+
+      // Clear RPC cache for this chain
+      this.rpcCache.clearCache(this.chainId);
+
+      // Reset counters on success
+      this.reconnectAttempts = 0;
+      this.consecutiveFailures = 0;
+
+      console.log(`[${this.chainId}] Successfully reconnected to RPC endpoint`);
+    } catch (error: any) {
+      rpcErrorThrottler.error(`${this.chainId}-reconnect-fail`, `[${this.chainId}] Reconnection failed:`, error);
+
+      // Check if we've exceeded max attempts
+      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+        console.warn(`[${this.chainId}] Max reconnection attempts (${this.maxReconnectAttempts}) reached. Will retry on next health check.`);
+        this.reconnecting = false;
+        // Reset attempts counter so next health check can trigger fresh reconnection
+        this.reconnectAttempts = 0;
+        return;
+      }
+
+      // Schedule another reconnection attempt if this one failed
+      const nextDelay = Math.min(this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts), this.maxReconnectDelay);
+      setTimeout(() => {
+        this.reconnecting = false;
+        this.reconnect().catch(err => {
+          rpcErrorThrottler.error(`${this.chainId}-reconnect-retry`, `[${this.chainId}] Scheduled reconnection failed:`, err);
+        });
+      }, nextDelay);
+    } finally {
+      this.reconnecting = false;
+    }
+  }
+
+  /**
+   * Handle RPC errors and trigger reconnection if needed.
+   * Tracks consecutive failures and initiates reconnection after threshold.
+   */
+  private handleRpcError(error: any): void {
+    const isRpcError = error?.message?.includes('503') ||
+                       error?.message?.includes('500') ||
+                       error?.message?.includes('SERVER_ERROR') ||
+                       error?.message?.includes('ECONNREFUSED') ||
+                       error?.message?.includes('timeout') ||
+                       error?.code === 'SERVER_ERROR' ||
+                       error?.code === 'NETWORK_ERROR';
+
+    if (isRpcError) {
+      this.consecutiveFailures++;
+
+      if (rpcErrorThrottler.shouldLog(`${this.chainId}-rpc-error`)) {
+        console.warn(`[${this.chainId}] RPC error detected (${this.consecutiveFailures}/${this.failureThreshold}): ${error.message}`);
+      }
+
+      if (this.consecutiveFailures >= this.failureThreshold && !this.reconnecting) {
+        console.warn(`[${this.chainId}] Triggering reconnection after ${this.consecutiveFailures} consecutive failures`);
+        this.reconnect().catch(err => {
+          rpcErrorThrottler.error(`${this.chainId}-reconnect-trigger`, `[${this.chainId}] Reconnection trigger failed:`, err);
+        });
+      }
+    }
+  }
+
+  /**
+   * Reset consecutive failure count on successful RPC call.
+   * Called after any successful RPC operation.
+   */
+  private handleRpcSuccess(): void {
+    if (this.consecutiveFailures > 0) {
+      this.consecutiveFailures = 0;
     }
   }
 

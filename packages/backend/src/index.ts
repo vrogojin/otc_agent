@@ -9,8 +9,97 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as https from 'https';
 
-// Load .env from project root
+// Load .env from project root FIRST (before any other imports that might use env vars)
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+// Import ErrorAlertService for global error handlers
+import { ErrorAlertService, getErrorAlertService } from './services/ErrorAlertService';
+import { RPCHealthService } from './services/RPCHealthService';
+
+// Initialize global error handlers EARLY (before any async operations)
+const alertService = getErrorAlertService();
+
+/**
+ * Global handler for unhandled promise rejections.
+ * Prevents crashes from RPC errors and other async failures.
+ */
+process.on('unhandledRejection', async (reason: any, promise: Promise<any>) => {
+  console.error('[GlobalErrorHandler] Unhandled Rejection:', reason);
+
+  // Detect RPC errors - comprehensive network error patterns
+  const isRpcError = reason?.message?.includes('503') ||
+                     reason?.message?.includes('500') ||
+                     reason?.message?.includes('ECONNREFUSED') ||
+                     reason?.message?.includes('ETIMEDOUT') ||
+                     reason?.message?.includes('EHOSTUNREACH') ||
+                     reason?.message?.includes('ENOTFOUND') ||
+                     reason?.message?.includes('timeout') ||
+                     reason?.message?.includes('network') ||
+                     reason?.code === 'SERVER_ERROR' ||
+                     reason?.code === 'NETWORK_ERROR' ||
+                     reason?.code === 'ECONNREFUSED' ||
+                     reason?.code === 'ETIMEDOUT';
+
+  await alertService.alert({
+    severity: isRpcError ? 'CRITICAL' : 'WARNING',
+    errorType: isRpcError ? 'RPC_CONNECTIVITY' : 'UNHANDLED_REJECTION',
+    message: String(reason?.message || reason),
+    error: reason,
+    context: {
+      code: reason?.code,
+      info: reason?.info
+    }
+  });
+
+  // Don't exit - continue operating
+  // The RPCHealthService will handle reconnection for RPC errors
+});
+
+/**
+ * Global handler for uncaught exceptions.
+ * Logs the error and alerts, but only exits for truly critical non-recoverable errors.
+ */
+process.on('uncaughtException', async (error: Error) => {
+  console.error('[GlobalErrorHandler] Uncaught Exception:', error);
+
+  // Check if this is an RPC-related error we can recover from
+  // Comprehensive network error patterns
+  const isRpcError = error?.message?.includes('503') ||
+                     error?.message?.includes('500') ||
+                     error?.message?.includes('SERVER_ERROR') ||
+                     error?.message?.includes('ECONNREFUSED') ||
+                     error?.message?.includes('ETIMEDOUT') ||
+                     error?.message?.includes('EHOSTUNREACH') ||
+                     error?.message?.includes('ENOTFOUND') ||
+                     error?.message?.includes('timeout') ||
+                     error?.message?.includes('network') ||
+                     (error as any)?.code === 'SERVER_ERROR' ||
+                     (error as any)?.code === 'NETWORK_ERROR' ||
+                     (error as any)?.code === 'ECONNREFUSED' ||
+                     (error as any)?.code === 'ETIMEDOUT';
+
+  // Wait for alert to complete before any exit decision
+  try {
+    await alertService.alert({
+      severity: 'CRITICAL',
+      errorType: 'UNCAUGHT_EXCEPTION',
+      message: error.message,
+      error
+    });
+  } catch (alertError) {
+    console.error('[GlobalErrorHandler] Failed to send alert:', alertError);
+  }
+
+  // For RPC errors, don't exit - let the service continue
+  // For other uncaught exceptions, exit after ensuring alert was sent
+  if (!isRpcError) {
+    console.error('[GlobalErrorHandler] Exiting due to non-recoverable exception');
+    // Give a small delay for any final cleanup, but alert is already sent
+    setTimeout(() => process.exit(1), 500);
+  } else {
+    console.warn('[GlobalErrorHandler] RPC error detected, continuing operation');
+  }
+});
 import { DB, initDatabase } from './db/database';
 import { runMigrations } from './db/migrate';
 import { RpcServer } from './api/rpc-server';
@@ -164,6 +253,13 @@ async function main() {
   // Initialize engine
   const engine = new Engine(db, pluginManager);
 
+  // Initialize RPC Health Service for monitoring EVM chain connectivity
+  const rpcHealthService = new RPCHealthService(
+    pluginManager,
+    parseInt(process.env.RPC_HEALTH_CHECK_INTERVAL || '60000'), // 60s default
+    parseInt(process.env.RPC_HEALTH_FAILURE_THRESHOLD || '3')   // 3 failures before alert
+  );
+
   // Initialize Recovery Manager
   const recoveryManager = new RecoveryManager({
     db,
@@ -255,9 +351,14 @@ async function main() {
   await recoveryManager.start();
   console.log('Recovery Manager started');
 
+  // Start RPC health monitoring
+  await rpcHealthService.start();
+  console.log('RPC Health Service started');
+
   // Graceful shutdown
   process.on('SIGINT', async () => {
     console.log('Shutting down...');
+    await rpcHealthService.stop();
     await recoveryManager.stop();
     engine.stop();
     rpcServer.stop();
@@ -270,6 +371,7 @@ async function main() {
 
   process.on('SIGTERM', async () => {
     console.log('Received SIGTERM, shutting down gracefully...');
+    await rpcHealthService.stop();
     await recoveryManager.stop();
     engine.stop();
     rpcServer.stop();
