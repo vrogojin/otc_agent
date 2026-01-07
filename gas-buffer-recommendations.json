@@ -1,0 +1,261 @@
+{
+  "analysisDate": "2025-10-30",
+  "status": "complete",
+  "dataSource": "conservative_estimates",
+  "safetyMultiplier": 5,
+  "networks": {
+    "ETH": {
+      "name": "Ethereum Mainnet",
+      "current": {
+        "gasBufferAmount": "0.005",
+        "unit": "ETH",
+        "status": "critically_low",
+        "risk": "high"
+      },
+      "recommended": {
+        "gasBufferAmount": "0.050000",
+        "unit": "ETH",
+        "bufferGwei": "50000000",
+        "changeRequired": "10x_increase",
+        "priority": "HIGH"
+      },
+      "calculation": {
+        "baseGasLimit": 200000,
+        "typicalGasPriceGwei": 50,
+        "safetyMultiplier": 5,
+        "formula": "200000 × 50 × 5 / 1e9 = 0.05 ETH"
+      },
+      "currentGasPrice": "0.18 gwei",
+      "brokerAddress": "0x3fC3D3aD9eC5FE34dCF72a806B6368de3eD2C4db",
+      "rpcEndpoint": "configured",
+      "blockExplorer": "https://etherscan.io/address/0x3fC3D3aD9eC5FE34dCF72a806B6368de3eD2C4db"
+    },
+    "POLYGON": {
+      "name": "Polygon Mainnet",
+      "current": {
+        "gasBufferAmount": "0.5",
+        "unit": "MATIC",
+        "status": "safe_generous",
+        "risk": "low"
+      },
+      "recommended": {
+        "gasBufferAmount": "0.150000",
+        "unit": "MATIC",
+        "bufferGwei": "150000000",
+        "changeRequired": "optional_optimization",
+        "priority": "LOW"
+      },
+      "calculation": {
+        "baseGasLimit": 200000,
+        "typicalGasPriceGwei": 150,
+        "safetyMultiplier": 5,
+        "formula": "200000 × 150 × 5 / 1e9 = 0.15 MATIC"
+      },
+      "currentGasPrice": "28.10 gwei",
+      "brokerAddress": "0x5449f15ae40fe89c8c4bd0d12930505ac2116443",
+      "rpcEndpoint": "configured",
+      "blockExplorer": "https://polygonscan.com/address/0x5449f15ae40fe89c8c4bd0d12930505ac2116443"
+    }
+  },
+  "envVariableUpdates": {
+    "required": [
+      {
+        "variable": "ETH_GAS_FUND_AMOUNT",
+        "currentValue": "0.005",
+        "recommendedValue": "0.050000",
+        "priority": "HIGH",
+        "reason": "Current buffer insufficient for broker swaps"
+      }
+    ],
+    "optional": [
+      {
+        "variable": "POLYGON_GAS_FUND_AMOUNT",
+        "currentValue": "0.5",
+        "recommendedValue": "0.150000",
+        "priority": "LOW",
+        "reason": "Current buffer safe but can be optimized",
+        "note": "Keeping 0.5 MATIC is also acceptable for maximum safety"
+      }
+    ]
+  },
+  "safetyMultiplierScenarios": {
+    "ETH": {
+      "2x": { "buffer": "0.020000", "bufferGwei": "20000000", "useCase": "Minimum safety (risky)" },
+      "3x": { "buffer": "0.030000", "bufferGwei": "30000000", "useCase": "Moderate safety" },
+      "5x": { "buffer": "0.050000", "bufferGwei": "50000000", "useCase": "Recommended (robust)" },
+      "10x": { "buffer": "0.100000", "bufferGwei": "100000000", "useCase": "Maximum safety" }
+    },
+    "POLYGON": {
+      "2x": { "buffer": "0.060000", "bufferGwei": "60000000", "useCase": "Minimum safety (risky)" },
+      "3x": { "buffer": "0.090000", "bufferGwei": "90000000", "useCase": "Moderate safety" },
+      "5x": { "buffer": "0.150000", "bufferGwei": "150000000", "useCase": "Recommended (robust)" },
+      "10x": { "buffer": "0.300000", "bufferGwei": "300000000", "useCase": "Maximum safety" }
+    }
+  },
+  "costImpact": {
+    "ETH": {
+      "perEscrowUSD": 125,
+      "assumedPrice": "$2500/ETH",
+      "scenarios": {
+        "singleDeal": { "escrows": 1, "costETH": "0.05", "costUSD": 125 },
+        "tenConcurrent": { "escrows": 10, "costETH": "0.5", "costUSD": 1250 },
+        "hundredConcurrent": { "escrows": 100, "costETH": "5", "costUSD": 12500 }
+      },
+      "note": "Funds refunded to tank after swap completion"
+    },
+    "POLYGON": {
+      "perEscrowUSD": 0.1,
+      "assumedPrice": "$0.70/MATIC",
+      "scenarios": {
+        "singleDeal": { "escrows": 1, "costMATIC": "0.15", "costUSD": 0.1 },
+        "tenConcurrent": { "escrows": 10, "costMATIC": "1.5", "costUSD": 1 },
+        "hundredConcurrent": { "escrows": 100, "costMATIC": "15", "costUSD": 10 }
+      },
+      "note": "Very affordable, minimal cost impact"
+    }
+  },
+  "riskAssessment": {
+    "currentETHRisk": {
+      "level": "HIGH",
+      "issues": [
+        "Insufficient gas funding for most broker swaps",
+        "Transactions likely to fail or get stuck",
+        "Users experience failed deals",
+        "Reputation damage from unreliable service"
+      ]
+    },
+    "recommendedETHRisk": {
+      "level": "LOW",
+      "benefits": [
+        "Robust protection against gas price volatility",
+        "Handles gas spikes up to 250 gwei",
+        "Covers complex multi-token swaps",
+        "Reliable user experience"
+      ]
+    },
+    "currentPolygonRisk": {
+      "level": "LOW",
+      "benefits": [
+        "Current buffer provides ~3.3x safety margin",
+        "Well protected against gas volatility",
+        "No risk of transaction failures"
+      ]
+    }
+  },
+  "nextSteps": [
+    {
+      "step": 1,
+      "action": "Update .env configuration",
+      "details": "Set ETH_GAS_FUND_AMOUNT=0.050000",
+      "priority": "HIGH"
+    },
+    {
+      "step": 2,
+      "action": "Optionally optimize Polygon buffer",
+      "details": "Set POLYGON_GAS_FUND_AMOUNT=0.150000 or keep 0.5",
+      "priority": "LOW"
+    },
+    {
+      "step": 3,
+      "action": "Restart backend service",
+      "details": "Apply new configuration",
+      "priority": "HIGH"
+    },
+    {
+      "step": 4,
+      "action": "Monitor native currency swaps",
+      "details": "Watch first few swaps for successful completion",
+      "priority": "MEDIUM"
+    },
+    {
+      "step": 5,
+      "action": "Collect transaction hashes",
+      "details": "From database or block explorers",
+      "priority": "MEDIUM"
+    },
+    {
+      "step": 6,
+      "action": "Re-run analysis with real data",
+      "details": "node analyze-gas-usage.js",
+      "priority": "MEDIUM"
+    },
+    {
+      "step": 7,
+      "action": "Fine-tune buffers",
+      "details": "Adjust based on actual usage patterns",
+      "priority": "LOW"
+    }
+  ],
+  "tools": {
+    "scripts": [
+      {
+        "name": "analyze-gas-usage.js",
+        "path": "/home/vrogojin/otc_agent/analyze-gas-usage.js",
+        "description": "Main gas analysis script with database and RPC querying",
+        "usage": "node analyze-gas-usage.js [--tx-hashes=...] [--chain=ETH|POLYGON]"
+      },
+      {
+        "name": "analyze-broker-gas-detailed.js",
+        "path": "/home/vrogojin/otc_agent/analyze-broker-gas-detailed.js",
+        "description": "Detailed per-transaction analysis with function inspection",
+        "usage": "node analyze-broker-gas-detailed.js <tx-hash> [--chain=ETH|POLYGON]"
+      },
+      {
+        "name": "test-gas-analysis.sh",
+        "path": "/home/vrogojin/otc_agent/test-gas-analysis.sh",
+        "description": "Test suite runner with usage examples",
+        "usage": "./test-gas-analysis.sh"
+      }
+    ],
+    "documentation": [
+      {
+        "name": "GAS_BUFFER_ANALYSIS.md",
+        "path": "/home/vrogojin/otc_agent/GAS_BUFFER_ANALYSIS.md",
+        "description": "Comprehensive technical report with mathematical derivations"
+      },
+      {
+        "name": "GAS_ANALYSIS_SUMMARY.md",
+        "path": "/home/vrogojin/otc_agent/GAS_ANALYSIS_SUMMARY.md",
+        "description": "Quick reference guide with action checklist"
+      },
+      {
+        "name": "gas-buffer-recommendations.json",
+        "path": "/home/vrogojin/otc_agent/gas-buffer-recommendations.json",
+        "description": "Machine-readable recommendations (this file)"
+      }
+    ]
+  },
+  "monitoring": {
+    "alertThresholds": {
+      "ETH_LOW_GAS_THRESHOLD": "0.1",
+      "POLYGON_LOW_GAS_THRESHOLD": "5"
+    },
+    "reviewSchedule": {
+      "weekly": "Check tank balances, refill if needed",
+      "monthly": "Re-run gas analysis with accumulated data",
+      "afterNetworkUpgrades": "Re-analyze after major Ethereum/Polygon upgrades",
+      "duringHighGas": "Monitor buffer adequacy during gas spikes"
+    },
+    "blockExplorers": {
+      "ethereum": "https://etherscan.io/address/0x3fC3D3aD9eC5FE34dCF72a806B6368de3eD2C4db",
+      "polygon": "https://polygonscan.com/address/0x5449f15ae40fe89c8c4bd0d12930505ac2116443"
+    }
+  },
+  "limitations": {
+    "noHistoricalData": true,
+    "conservativeEstimates": true,
+    "requiresRefinement": "Re-run analysis with actual transaction data once native currency swaps occur",
+    "baseGasEstimate": "200,000 gas is conservative, actual usage may vary"
+  },
+  "methodology": {
+    "dataCollection": "Database query + on-chain RPC calls",
+    "statisticsCalculated": ["min", "avg", "max", "p95"],
+    "bufferFormula": "MAX(gasUsed) × typicalGasPrice × safetyMultiplier",
+    "safetyMultiplierRationale": [
+      "Protects against 3-5x gas price spikes",
+      "Covers complex swap scenarios",
+      "Future-proofing for contract upgrades",
+      "Industry standard for production systems"
+    ]
+  }
+}

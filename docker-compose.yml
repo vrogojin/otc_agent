@@ -1,0 +1,21 @@
+services:
+  unicity-swap:
+    container_name: unicity-swap
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks:
+      - haproxy-net
+    volumes:
+      - ./packages/backend/data:/app/packages/backend/data
+      - ./logs:/app/packages/backend/logs
+      - ./.ssl:/app/.ssl:ro
+      - ./.env.production:/app/.env:ro
+    environment:
+      - NODE_ENV=production
+    working_dir: /app/packages/backend
+
+networks:
+  haproxy-net:
+    external: true

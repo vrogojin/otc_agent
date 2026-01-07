@@ -1,0 +1,56 @@
+{
+  "brokerSwaps": {
+    "ETH": [
+      {
+        "dealId": "ebb9101d6f679583c12da207812c7a1b",
+        "txHash": "0xe9530008cf98875a065b0aacc316f9869a8122e452256e7e9ac68132a8f07460",
+        "amount": "0.001",
+        "asset": "ETH",
+        "chainId": "ETH",
+        "phase": "PHASE_1_SWAP",
+        "toAddr": "0xC7DcbF135F088dA2a4BeC3FaB5c21C30735166c8",
+        "queueItemId": "433ff0591175e4d690e82ae518cd296e"
+      },
+      {
+        "dealId": "53bb843db002578f6165af038675e585",
+        "txHash": "0xbf69ecb587863529e867af6f53122d9e3a222b99a252fdc0b084ee6c7a88c80e",
+        "amount": "0.001",
+        "asset": "ETH",
+        "chainId": "ETH",
+        "phase": "PHASE_1_SWAP",
+        "toAddr": "0xC7DcbF135F088dA2a4BeC3FaB5c21C30735166c8",
+        "queueItemId": "70f4d723e3d803a7b9802d76fd2de681"
+      }
+    ],
+    "POLYGON": [
+      {
+        "dealId": "90126ba395dc2cac804cb79dd4eb9d8e",
+        "txHash": "0xfaee7bffabd0693ff73f1a3bd3df9effa8ac664469a71c831282176f71741f36",
+        "amount": "0.1",
+        "asset": "MATIC",
+        "chainId": "POLYGON",
+        "phase": "PHASE_1_SWAP",
+        "toAddr": "0xC7DcbF135F088dA2a4BeC3FaB5c21C30735166c8",
+        "queueItemId": "4506344d41080911a712f16f9550c070"
+      },
+      {
+        "dealId": "e94077c5a766f31da0c3a8afd7184d14",
+        "txHash": "0xde46812cb546e596536d158beb4d782a14e5d214912f2c953c091b0836004f19",
+        "amount": "0.1",
+        "asset": "MATIC",
+        "chainId": "POLYGON",
+        "phase": "PHASE_1_SWAP",
+        "toAddr": "0xC7DcbF135F088dA2a4BeC3FaB5c21C30735166c8",
+        "queueItemId": "45ece809b173a8a96b1c3bc9a34e59f4"
+      }
+    ],
+    "BSC": [],
+    "UNICITY": []
+  },
+  "directTransfers": {
+    "ETH": [],
+    "POLYGON": [],
+    "BSC": [],
+    "UNICITY": []
+  }
+}

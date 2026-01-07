@@ -1,0 +1,130 @@
+================================================================================
+  GAS ANALYSIS QUICK REFERENCE - Native Currency Swaps
+================================================================================
+
+DATE: 2025-10-30
+DATABASE: /home/vrogojin/otc_agent/packages/backend/data/otc-production.db
+
+================================================================================
+TRANSACTION HASHES EXTRACTED
+================================================================================
+
+ETHEREUM (2):
+  0xe9530008cf98875a065b0aacc316f9869a8122e452256e7e9ac68132a8f07460
+  0xbf69ecb587863529e867af6f53122d9e3a222b99a252fdc0b084ee6c7a88c80e
+
+POLYGON (2):
+  0xfaee7bffabd0693ff73f1a3bd3df9effa8ac664469a71c831282176f71741f36
+  0xde46812cb546e596536d158beb4d782a14e5d214912f2c953c091b0836004f19
+
+================================================================================
+BLOCK EXPLORER LINKS
+================================================================================
+
+Ethereum:
+  https://etherscan.io/tx/0xe9530008cf98875a065b0aacc316f9869a8122e452256e7e9ac68132a8f07460
+  https://etherscan.io/tx/0xbf69ecb587863529e867af6f53122d9e3a222b99a252fdc0b084ee6c7a88c80e
+
+Polygon:
+  https://polygonscan.com/tx/0xfaee7bffabd0693ff73f1a3bd3df9effa8ac664469a71c831282176f71741f36
+  https://polygonscan.com/tx/0xde46812cb546e596536d158beb4d782a14e5d214912f2c953c091b0836004f19
+
+================================================================================
+STATISTICS
+================================================================================
+
+Total CLOSED Deals:        13
+Native Currency Deals:     4
+Broker Swaps (BROKER_SWAP): 4
+Direct Transfers:          0
+
+Chains Active:
+  - Ethereum:  2 transactions
+  - Polygon:   2 transactions
+
+Chains Inactive:
+  - BSC:       0 transactions
+  - Unicity:   0 transactions
+
+================================================================================
+FILES GENERATED
+================================================================================
+
+Main Summary:
+  /home/vrogojin/otc_agent/GAS_ANALYSIS_SUMMARY.md
+
+Output Directory:
+  /home/vrogojin/otc_agent/gas-analysis-output/
+
+Files:
+  ├── GAS_ANALYSIS_REPORT.md           (Comprehensive report)
+  ├── native-swaps-detailed.json       (Complete transaction data)
+  ├── tx-hashes-by-chain.json          (Hash list by chain)
+  └── README.md                         (Directory documentation)
+
+Scripts:
+  ├── analyze-native-swaps.js          (Database query script)
+  ├── analyze-gas-usage.js             (RPC gas analysis script)
+  ├── fetch-gas-details.js             (Explorer link generator)
+  └── check-schema.js                  (Schema inspector)
+
+================================================================================
+USAGE EXAMPLES
+================================================================================
+
+1. Query database for native swaps:
+   $ node analyze-native-swaps.js
+
+2. Fetch actual gas usage from RPC:
+   $ node analyze-gas-usage.js
+
+3. Analyze specific transactions:
+   $ node analyze-gas-usage.js --tx-hashes=0x... --chain=ETH
+
+4. Generate explorer links:
+   $ node fetch-gas-details.js
+
+5. Check database schema:
+   $ node check-schema.js
+
+================================================================================
+EXPECTED GAS COSTS (from contract tests)
+================================================================================
+
+Native Currency Swap:  ~138,000 gas
+ERC20 Token Swap:      ~150,000-180,000 gas
+
+Ethereum (50 gwei):
+  138,000 × 50 = 6,900,000 gwei = 0.0069 ETH
+  At $2,000/ETH: ~$13.80 per swap
+
+Polygon (150 gwei):
+  138,000 × 150 = 20,700,000 gwei = 0.0207 MATIC
+  At $0.80/MATIC: ~$0.016 per swap
+
+================================================================================
+GAS BUFFER RECOMMENDATIONS (5x safety multiplier)
+================================================================================
+
+ETH_GAS_FUND_AMOUNT=0.0345      # (0.0069 × 5)
+POLYGON_GAS_FUND_AMOUNT=0.1035  # (0.0207 × 5)
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Visit block explorer links above
+2. Extract actual gas metrics from transactions
+3. Calculate average and P95 gas usage
+4. Update gas buffer environment variables
+5. Monitor gas prices for optimal execution
+
+================================================================================
+SUPPORT RESOURCES
+================================================================================
+
+Detailed Report:    gas-analysis-output/GAS_ANALYSIS_REPORT.md
+Directory Docs:     gas-analysis-output/README.md
+Project Docs:       ARCHITECTURE.md, CLAUDE.md, OTC_BROKER_BIGDOC_v1.0.md
+
+================================================================================

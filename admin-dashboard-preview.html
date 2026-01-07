@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Dashboard Preview - OTC Broker</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .preview-section {
+      margin-bottom: 60px;
+    }
+    .preview-header {
+      color: #00d4ff;
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #00d4ff;
+    }
+    .preview-description {
+      color: #a0a0a0;
+      margin-bottom: 20px;
+      padding: 15px;
+      background: #0f3460;
+      border-radius: 6px;
+    }
+    .iframe-container {
+      background: white;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+    }
+    iframe {
+      width: 100%;
+      height: 600px;
+      border: none;
+    }
+    .navbar {
+      background: #0f3460 !important;
+      margin-bottom: 30px;
+      border-radius: 8px;
+    }
+    .navbar-brand {
+      color: #00d4ff !important;
+      font-weight: 700;
+    }
+    .nav-link {
+      color: #a0a0a0 !important;
+    }
+    .nav-link:hover, .nav-link.active {
+      color: #00d4ff !important;
+    }
+    .feature-list {
+      list-style: none;
+      padding-left: 0;
+    }
+    .feature-list li {
+      padding: 8px 0;
+      color: #e0e0e0;
+    }
+    .feature-list li::before {
+      content: "✓ ";
+      color: #00d4ff;
+      font-weight: bold;
+      margin-right: 8px;
+    }
+    code {
+      background: #16213e;
+      color: #00d4ff;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="#overview">🔧 OTC Admin Dashboard Preview</a>
+      <div class="collapse navbar-collapse">
+        <ul class="navbar-nav me-auto">
+          <li class="nav-item">
+            <a class="nav-link" href="#login">Login</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="#deals">Deals List</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="#details">Deal Details</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="#accounts">Accounts</a>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container-fluid" style="max-width: 1400px;">
+
+    <!-- Overview Section -->
+    <div id="overview" class="preview-section">
+      <h1 style="color: #00d4ff; font-size: 36px; margin-bottom: 20px;">
+        OTC Broker Admin Dashboard
+      </h1>
+      <div class="preview-description">
+        <h3 style="color: #00d4ff; margin-bottom: 15px;">Features</h3>
+        <ul class="feature-list">
+          <li>Simple email/password authentication with session management</li>
+          <li>Dark theme with clean, modern Bootstrap 5 UI</li>
+          <li>Deal list with sortable columns and color-coded stages</li>
+          <li>Detailed deal view with live escrow balances</li>
+          <li>Manual spend functionality for emergency operations</li>
+          <li>Account balance monitoring for tank and operator wallets</li>
+          <li>Mobile responsive design</li>
+          <li>Server-side rendered HTML (no complex frontend framework)</li>
+        </ul>
+
+        <h3 style="color: #00d4ff; margin: 20px 0 15px 0;">Tech Stack</h3>
+        <ul class="feature-list">
+          <li>Express.js for routing</li>
+          <li>Bootstrap 5 from CDN</li>
+          <li>Cookie-based sessions</li>
+          <li>Template literal HTML rendering</li>
+          <li>No build step required for frontend</li>
+        </ul>
+
+        <h3 style="color: #00d4ff; margin: 20px 0 15px 0;">Quick Start</h3>
+        <pre style="background: #16213e; padding: 15px; border-radius: 6px; overflow-x: auto;">
+# 1. Install dependencies
+npm install cookie-parser
+
+# 2. Set environment variables
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=secure-password
+
+# 3. Integrate into rpc-server.ts
+import cookieParser from 'cookie-parser';
+import { setupAdminRoutes } from './admin-routes';
+
+this.app.use(cookieParser());
+setupAdminRoutes(this.app, this.db, this.pluginManager);
+
+# 4. Start server
+npm run dev
+
+# 5. Navigate to
+http://localhost:8080/admin/login
+        </pre>
+      </div>
+    </div>
+
+    <!-- Login Page Preview -->
+    <div id="login" class="preview-section">
+      <div class="preview-header">1. Login Page</div>
+      <div class="preview-description">
+        <strong>Route:</strong> <code>GET /admin/login</code><br>
+        <strong>Features:</strong>
+        <ul class="feature-list">
+          <li>Clean centered design with gradient background</li>
+          <li>Email and password fields</li>
+          <li>Error message display (if invalid credentials)</li>
+          <li>Session created on successful login (24-hour duration)</li>
+        </ul>
+        <strong>Default Credentials:</strong> Set via <code>ADMIN_EMAIL</code> and <code>ADMIN_PASSWORD</code> env vars
+      </div>
+      <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 40px; border-radius: 8px; text-align: center;">
+        <div style="background: #0f3460; border-radius: 12px; padding: 40px; max-width: 400px; margin: 0 auto; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #00d4ff; font-size: 28px; font-weight: 700; margin-bottom: 10px;">🔐 Admin Login</h1>
+            <p style="color: #a0a0a0; font-size: 14px;">OTC Broker Engine Dashboard</p>
+          </div>
+          <form>
+            <div class="mb-3" style="text-align: left;">
+              <label style="color: #e0e0e0; font-weight: 500; margin-bottom: 8px; display: block;">Email</label>
+              <input type="email" class="form-control" style="background: #16213e; border: 1px solid #2a4563; color: #e0e0e0; padding: 12px; border-radius: 6px;" placeholder="admin@example.com">
+            </div>
+            <div class="mb-3" style="text-align: left;">
+              <label style="color: #e0e0e0; font-weight: 500; margin-bottom: 8px; display: block;">Password</label>
+              <input type="password" class="form-control" style="background: #16213e; border: 1px solid #2a4563; color: #e0e0e0; padding: 12px; border-radius: 6px;" placeholder="••••••••">
+            </div>
+            <button type="button" class="btn btn-primary w-100" style="background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%); border: none; padding: 12px; font-weight: 600; border-radius: 6px; margin-top: 20px;">Login</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Deals List Preview -->
+    <div id="deals" class="preview-section">
+      <div class="preview-header">2. Deals List Page</div>
+      <div class="preview-description">
+        <strong>Route:</strong> <code>GET /admin/deals</code> (requires auth)<br>
+        <strong>Features:</strong>
+        <ul class="feature-list">
+          <li>Table view of all deals in the database</li>
+          <li>Shows: Deal ID, Name, Stage, Alice/Bob assets and amounts, Created date</li>
+          <li>Color-coded stage badges (CREATED, COLLECTION, WAITING, SWAP, CLOSED, REVERTED)</li>
+          <li>Clickable rows navigate to deal details</li>
+          <li>Navbar with Deals/Accounts links and Logout button</li>
+        </ul>
+      </div>
+      <div style="background: #0f3460; border-radius: 8px; padding: 20px;">
+        <table class="table table-hover" style="color: #e0e0e0; margin-bottom: 0;">
+          <thead>
+            <tr>
+              <th style="border-color: #2a4563; color: #00d4ff; font-weight: 600;">Deal ID</th>
+              <th style="border-color: #2a4563; color: #00d4ff; font-weight: 600;">Name</th>
+              <th style="border-color: #2a4563; color: #00d4ff; font-weight: 600;">Stage</th>
+              <th style="border-color: #2a4563; color: #00d4ff; font-weight: 600;">Alice (A → B)</th>
+              <th style="border-color: #2a4563; color: #00d4ff; font-weight: 600;">Bob (B → A)</th>
+              <th style="border-color: #2a4563; color: #00d4ff; font-weight: 600;">Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="cursor: pointer;">
+              <td style="border-color: #2a4563; font-family: 'Courier New', monospace; color: #00d4ff;">3f5a2b1c...</td>
+              <td style="border-color: #2a4563;">Swift Elephant</td>
+              <td style="border-color: #2a4563;">
+                <span style="background: #198754; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600;">CLOSED</span>
+              </td>
+              <td style="border-color: #2a4563;">
+                <div>100.0000 NATIVE</div>
+                <div style="color: #a0a0a0; font-size: 11px;">UNICITY</div>
+              </td>
+              <td style="border-color: #2a4563;">
+                <div>0.0500 NATIVE</div>
+                <div style="color: #a0a0a0; font-size: 11px;">ETH</div>
+              </td>
+              <td style="border-color: #2a4563;">2025-10-23 10:30:15</td>
+            </tr>
+            <tr style="cursor: pointer;">
+              <td style="border-color: #2a4563; font-family: 'Courier New', monospace; color: #00d4ff;">7d9e4c2a...</td>
+              <td style="border-color: #2a4563;">Bold Tiger</td>
+              <td style="border-color: #2a4563;">
+                <span style="background: #ffc107; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; color: #000;">COLLECTION</span>
+              </td>
+              <td style="border-color: #2a4563;">
+                <div>500.0000 NATIVE</div>
+                <div style="color: #a0a0a0; font-size: 11px;">POLYGON</div>
+              </td>
+              <td style="border-color: #2a4563;">
+                <div>1.2500 NATIVE</div>
+                <div style="color: #a0a0a0; font-size: 11px;">UNICITY</div>
+              </td>
+              <td style="border-color: #2a4563;">2025-10-23 14:22:05</td>
+            </tr>
+            <tr style="cursor: pointer;">
+              <td style="border-color: #2a4563; font-family: 'Courier New', monospace; color: #00d4ff;">9b2f1e5d...</td>
+              <td style="border-color: #2a4563;">Quick Fox</td>
+              <td style="border-color: #2a4563;">
+                <span style="background: #0d6efd; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600;">SWAP</span>
+              </td>
+              <td style="border-color: #2a4563;">
+                <div>0.1000 NATIVE</div>
+                <div style="color: #a0a0a0; font-size: 11px;">ETH</div>
+              </td>
+              <td style="border-color: #2a4563;">
+                <div>250.0000 NATIVE</div>
+                <div style="color: #a0a0a0; font-size: 11px;">POLYGON</div>
+              </td>
+              <td style="border-color: #2a4563;">2025-10-23 16:45:30</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Deal Details Preview -->
+    <div id="details" class="preview-section">
+      <div class="preview-header">3. Deal Details Page</div>
+      <div class="preview-description">
+        <strong>Route:</strong> <code>GET /admin/deals/:id</code> (requires auth)<br>
+        <strong>Features:</strong>
+        <ul class="feature-list">
+          <li>Complete deal information (ID, name, stage, timeout, dates)</li>
+          <li>Alice and Bob details (chain, asset, amount, addresses)</li>
+          <li>Live escrow balances fetched from blockchain</li>
+          <li>Manual spend form for emergency operations</li>
+          <li>Back to list navigation</li>
+        </ul>
+      </div>
+      <div class="row">
+        <div class="col-lg-6">
+          <div style="background: #0f3460; border: 1px solid #2a4563; border-radius: 8px; margin-bottom: 20px;">
+            <div style="background: #16213e; border-bottom: 1px solid #2a4563; color: #00d4ff; font-weight: 600; padding: 15px 20px;">
+              Deal Information
+            </div>
+            <div style="padding: 20px;">
+              <div style="display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #2a4563;">
+                <span style="color: #a0a0a0; font-weight: 500;">Name:</span>
+                <span style="color: #e0e0e0; font-family: 'Courier New', monospace;">Swift Elephant</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #2a4563;">
+                <span style="color: #a0a0a0; font-weight: 500;">Stage:</span>
+                <span style="background: #198754; padding: 6px 14px; border-radius: 14px; font-size: 12px; font-weight: 600;">CLOSED</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 10px 0;">
+                <span style="color: #a0a0a0; font-weight: 500;">Created:</span>
+                <span style="color: #e0e0e0; font-family: 'Courier New', monospace;">2025-10-23 10:30:15</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-6">
+          <div style="background: #0f3460; border: 1px solid #2a4563; border-radius: 8px; margin-bottom: 20px;">
+            <div style="background: #16213e; border-bottom: 1px solid #2a4563; color: #00d4ff; font-weight: 600; padding: 15px 20px;">
+              💰 Escrow Balances
+            </div>
+            <div style="padding: 20px;">
+              <h6 style="color: #00d4ff; margin-bottom: 15px;">Alice Escrow</h6>
+              <div style="background: #16213e; border: 1px solid #2a4563; border-radius: 6px; padding: 15px; margin: 10px 0;">
+                <div style="color: #a0a0a0; font-size: 13px; margin-bottom: 5px;">
+                  Address: <code style="font-size: 11px;">unicity1qp3w2...</code>
+                </div>
+                <div style="color: #00d4ff; font-size: 20px; font-weight: 700; font-family: 'Courier New', monospace;">
+                  0.000000 NATIVE
+                </div>
+              </div>
+
+              <h6 style="color: #00d4ff; margin: 20px 0 15px 0;">Bob Escrow</h6>
+              <div style="background: #16213e; border: 1px solid #2a4563; border-radius: 6px; padding: 15px; margin: 10px 0;">
+                <div style="color: #a0a0a0; font-size: 13px; margin-bottom: 5px;">
+                  Address: <code style="font-size: 11px;">0x742d35C...</code>
+                </div>
+                <div style="color: #00d4ff; font-size: 20px; font-weight: 700; font-family: 'Courier New', monospace;">
+                  0.000000 NATIVE
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Accounts Page Preview -->
+    <div id="accounts" class="preview-section">
+      <div class="preview-header">4. Accounts Balance Page</div>
+      <div class="preview-description">
+        <strong>Route:</strong> <code>GET /admin/accounts</code> (requires auth)<br>
+        <strong>Features:</strong>
+        <ul class="feature-list">
+          <li>Tank wallet balances for gas funding (per chain)</li>
+          <li>Operator address balances (per chain)</li>
+          <li>Native and ERC20 token balances</li>
+          <li>Low balance warnings (highlighted in red)</li>
+          <li>Configurable low balance thresholds</li>
+        </ul>
+      </div>
+      <div class="row">
+        <div class="col-lg-6">
+          <div style="background: #0f3460; border: 1px solid #2a4563; border-radius: 8px;">
+            <div style="background: #16213e; border-bottom: 1px solid #2a4563; color: #00d4ff; font-weight: 600; padding: 15px 20px;">
+              🏦 Tank Wallet (Gas Funding)
+            </div>
+            <div style="padding: 20px;">
+              <div style="color: #6c757d; font-family: 'Courier New', monospace; font-size: 12px; margin-bottom: 20px;">
+                Address: 0x1234...5678
+              </div>
+
+              <!-- ETH Chain - Normal Balance -->
+              <div style="background: #16213e; border: 1px solid #2a4563; border-radius: 6px; padding: 15px; margin-bottom: 15px;">
+                <div style="color: #00d4ff; font-weight: 600; font-size: 16px; margin-bottom: 10px;">ETH</div>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #2a4563;">
+                  <span style="color: #a0a0a0; font-size: 14px;">Native Balance:</span>
+                  <span style="color: #e0e0e0; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 600;">2.500000</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0;">
+                  <span style="color: #a0a0a0; font-size: 14px;">Low Threshold:</span>
+                  <span style="color: #e0e0e0; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 600;">0.100000</span>
+                </div>
+              </div>
+
+              <!-- POLYGON Chain - Low Balance Warning -->
+              <div style="background: rgba(220, 53, 69, 0.1); border: 1px solid #dc3545; border-radius: 6px; padding: 15px; margin-bottom: 15px;">
+                <div style="color: #00d4ff; font-weight: 600; font-size: 16px; margin-bottom: 10px;">
+                  POLYGON
+                  <span style="background: #dc3545; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-left: 10px;">LOW</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #2a4563;">
+                  <span style="color: #a0a0a0; font-size: 14px;">Native Balance:</span>
+                  <span style="color: #ff6b6b; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 600;">2.300000</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0;">
+                  <span style="color: #a0a0a0; font-size: 14px;">Low Threshold:</span>
+                  <span style="color: #e0e0e0; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 600;">5.000000</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-6">
+          <div style="background: #0f3460; border: 1px solid #2a4563; border-radius: 8px;">
+            <div style="background: #16213e; border-bottom: 1px solid #2a4563; color: #00d4ff; font-weight: 600; padding: 15px 20px;">
+              ⚙️ Operator Addresses
+            </div>
+            <div style="padding: 20px;">
+              <!-- UNICITY Operator -->
+              <div style="background: #16213e; border: 1px solid #2a4563; border-radius: 6px; padding: 15px; margin-bottom: 15px;">
+                <div style="color: #00d4ff; font-weight: 600; font-size: 16px; margin-bottom: 5px;">UNICITY</div>
+                <div style="color: #6c757d; font-family: 'Courier New', monospace; font-size: 12px; margin-bottom: 10px;">
+                  unicity1abc...xyz
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0;">
+                  <span style="color: #a0a0a0; font-size: 14px;">Native Balance:</span>
+                  <span style="color: #e0e0e0; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 600;">15000.000000</span>
+                </div>
+              </div>
+
+              <!-- ETH Operator -->
+              <div style="background: #16213e; border: 1px solid #2a4563; border-radius: 6px; padding: 15px; margin-bottom: 15px;">
+                <div style="color: #00d4ff; font-weight: 600; font-size: 16px; margin-bottom: 5px;">ETH</div>
+                <div style="color: #6c757d; font-family: 'Courier New', monospace; font-size: 12px; margin-bottom: 10px;">
+                  0x742d35C...
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #2a4563;">
+                  <span style="color: #a0a0a0; font-size: 14px;">Native Balance:</span>
+                  <span style="color: #e0e0e0; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 600;">0.850000</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0;">
+                  <span style="color: #a0a0a0; font-size: 14px;">USDT:</span>
+                  <span style="color: #e0e0e0; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 600;">5000.000000</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div style="text-align: center; padding: 40px 0; color: #6c757d; border-top: 1px solid #2a4563; margin-top: 40px;">
+      <p>OTC Broker Admin Dashboard Preview</p>
+      <p style="font-size: 13px;">See <code>ADMIN_DASHBOARD_INTEGRATION.md</code> for full integration guide</p>
+    </div>
+
+  </div>
+</body>
+</html>

@@ -1,0 +1,58 @@
+{
+  "summary": {
+    "ETH": {
+      "avgGasUsed": "N/A",
+      "maxGasUsed": 200000,
+      "p95GasUsed": "N/A",
+      "avgGasPrice": "50.00 (estimated)",
+      "currentGasPrice": "0.18 gwei",
+      "recommendedBuffer": "0.050000 ETH",
+      "recommendedBufferGwei": "50000000",
+      "safetyMultiplier": "5x",
+      "isConservativeEstimate": true
+    },
+    "POLYGON": {
+      "avgGasUsed": "N/A",
+      "maxGasUsed": 200000,
+      "p95GasUsed": "N/A",
+      "avgGasPrice": "150.00 (estimated)",
+      "currentGasPrice": "28.10 gwei",
+      "recommendedBuffer": "0.150000 MATIC",
+      "recommendedBufferGwei": "150000000",
+      "safetyMultiplier": "5x",
+      "isConservativeEstimate": true
+    }
+  },
+  "details": {
+    "ETH": {
+      "chain": "ETH",
+      "name": "Ethereum",
+      "nativeCurrency": "ETH",
+      "stats": null,
+      "currentGasPrice": "0.18 gwei",
+      "buffer": {
+        "recommendedBuffer": "0.050000",
+        "recommendedBufferGwei": "50000000",
+        "baseGasUsed": 200000,
+        "typicalGasPriceGwei": "50.00",
+        "safetyMultiplier": "5x"
+      },
+      "isConservativeEstimate": true
+    },
+    "POLYGON": {
+      "chain": "POLYGON",
+      "name": "Polygon",
+      "nativeCurrency": "MATIC",
+      "stats": null,
+      "currentGasPrice": "28.10 gwei",
+      "buffer": {
+        "recommendedBuffer": "0.150000",
+        "recommendedBufferGwei": "150000000",
+        "baseGasUsed": 200000,
+        "typicalGasPriceGwei": "150.00",
+        "safetyMultiplier": "5x"
+      },
+      "isConservativeEstimate": true
+    }
+  }
+}

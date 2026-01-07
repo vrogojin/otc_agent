@@ -1,0 +1,249 @@
+================================================================================
+VISUAL FLOW DIAGRAM: Confirmation Threshold Bug
+================================================================================
+
+CORRECT BEHAVIOR (What Should Happen)
+================================================================================
+
+                          CREATED
+                            |
+                            v
+      [ Both parties fill details ]
+                            |
+                            v
+                        COLLECTION (minConf=2 for deposits)
+                            |
+                    [ Deposits arrive ]
+                            |
+                   [ Check locks with minConf=2 ]
+                            |
+                    [ Locks set when minConf=2 reached ]
+                            |
+                            v
+      [ LOCKS CLEARED at transition point ]  ← KEY: Prevents carryover
+                            |
+                            v
+                         WAITING (minConf=6 required)
+                            |
+              [ Engine re-checks locks with minConf=6 ]
+                            |
+         [ Waits until BOTH sides have 6+ confirmations ]
+                            |
+                   [ Locks set when minConf=6 reached ]
+                            |
+                            v
+                           SWAP
+                            |
+                   [ Execute swap transfers ]
+                            |
+                            v
+                          CLOSED
+
+
+ACTUAL BUGGY BEHAVIOR (What Currently Happens)
+================================================================================
+
+                          CREATED
+                            |
+                            v
+      [ Both parties fill details ]
+                            |
+                            v
+                        COLLECTION (minConf=2 for deposits)
+                            |
+                    [ Deposits arrive ]
+                            |
+                   [ Check locks with minConf=2 ]
+                            |
+                    [ Locks set when minConf=2 reached ]
+                            |
+                            v
+      [ LOCKS NOT CLEARED at transition ]  ← BUG: Locks persist!
+                            |
+                            v
+                         WAITING (minConf=6 REQUIRED!)
+                            |
+         [ Engine checks: "Do locks exist?" ]
+              Result: YES (from COLLECTION stage)
+                            |
+      [ NO RE-VERIFICATION with minConf=6 ]  ← BUG: Skips validation!
+                            |
+                            v
+      [ IMMEDIATE TRANSITION to SWAP ]  ← BUG: Too early!
+                            |
+                   [ Execute swap transfers ]
+           (only 2-4 confirmations, not 6!)
+                            |
+                            v
+                          CLOSED
+                    ❌ SECURITY ISSUE!
+
+
+COMPARISON TABLE
+================================================================================
+
+Aspect              | CORRECT           | BUGGY
+--------------------|-------------------|----------------------------------
+COLLECTION stage    | Locks set w/      | Locks set w/
+                    | minConf=2         | minConf=2
+--------------------|-------------------|----------------------------------
+Transition logic    | Clear locks       | Locks NOT cleared ❌
+                    | before WAITING    |
+--------------------|-------------------|----------------------------------
+WAITING stage       | Re-verify locks   | Check if locks exist ❌
+lock check          | with minConf=6    | (no re-verification)
+--------------------|-------------------|----------------------------------
+Confirmations       | Waits for 6+      | Trusts old locks
+before SWAP         | confirmations     | from COLLECTION (2 confs) ❌
+--------------------|-------------------|----------------------------------
+SWAP execution      | Guaranteed to     | May execute with
+confirmations       | have minConf=6    | only 2-4 confs ❌
+--------------------|-------------------|----------------------------------
+
+
+TIMELINE ANALYSIS
+================================================================================
+
+Time    CORRECT Behavior          BUGGY Behavior
+------  ----------------------    ----------------------
+T0      Deal created              Deal created
+        → COLLECTION              → COLLECTION
+
+T1      Deposits arrive           Deposits arrive
+        with 2 confirmations      with 2 confirmations
+
+T2      Lock check:               Lock check:
+        minConf=2 ✓               minConf=2 ✓
+        → Locks SET               → Locks SET
+
+T3      Transition check:         Transition check:
+        → CLEAR locks ✓           → NO clear ❌
+        → WAITING                 → WAITING
+
+T4      More blocks mined         More blocks mined
+        Confirmations: 3-4        Confirmations: 3-4
+        Lock status: NOT SET      Lock status: STILL SET ❌
+
+T5      Engine cycle:             Engine cycle:
+        Check: Locks exist?       Check: Locks exist?
+        No → Still waiting ✓      Yes → TRANSITION! ❌
+
+T6      More blocks mined         [SWAP EXECUTES]
+        Confirmations: 5-6        with only 4 confs ❌
+
+T7      Engine cycle:
+        Check: Locks exist?
+        with minConf=6 ✓
+        → Locks NOW SET
+        → SWAP
+
+T8      [SWAP EXECUTES]
+        with 6+ confirmations ✓
+
+
+CODE FLOW DIAGRAM
+================================================================================
+
+processDeal()
+    |
+    v
+[if deal.stage === 'WAITING'] (Line 275)
+    |
+    +-- await updateDeposits(deal);  (Line 278)
+    |
+    +-- const sideALocked = deal.sideAState?.locks.tradeLockedAt && ...
+    |   const sideBLocked = deal.sideBState?.locks.tradeLockedAt && ...
+    |   (Line 283-284)
+    |
+    |   ❌ BUG: Only checks if locks EXIST
+    |   ❌ Does NOT re-verify locks with minConf=6
+    |   ❌ Does NOT check deposit confirmation counts
+    |
+    +-- if (sideALocked && sideBLocked) {
+    |       |
+    |       +-- await buildTransferPlan(deal);  (Line 305)
+    |       +-- this.dealRepo.updateStage(deal.id, 'SWAP');  (Line 306)
+    |
+    +-- } else {
+        +-- console.log('waiting for more confirmations')
+        +-- Stay in WAITING stage
+
+
+KEY CODE LOCATIONS
+================================================================================
+
+Location                                          Status  Issue
+--------                                          ------  -----
+.env lines 52-53                                  ✓✓      Configuration is correct
+index.ts lines 81-82                              ✓✓      Plugin registration correct
+UnicityPlugin.ts lines 748-754                    ✓✓      Methods return correct values
+Engine.ts lines 514-516, 653-655                  ✓✓      Lock check logic correct
+Engine.ts lines 254-259 (COLLECTION→WAITING)     ❌      Should clear locks
+Engine.ts lines 275-322 (WAITING stage)           ❌❌    Should re-verify locks
+
+
+LOCK STATE OVER TIME
+================================================================================
+
+Stage           Action                      Lock State
+-----           ------                      ----------
+COLLECTION      Enter stage                 locks = {}
+                Check with minConf=2
+                Both conditions met         locks = {tradeLockedAt: T,
+                                                    commissionLockedAt: T}
+                Prepare to transition
+
+WAITING         Enter stage (BUG!)          locks = {tradeLockedAt: T, ❌
+(Transition)                                        commissionLockedAt: T}
+                Should clear                (should be: locks = {})
+
+WAITING         Start processing            locks = {tradeLockedAt: T,
+(Processing)    Check if exist?             commissionLockedAt: T}
+                YES → TRANSITION! ❌
+
+SWAP            [Executes swap]             locks = {still set}
+
+
+FIX STRATEGY
+================================================================================
+
+OPTION A (Recommended):
+At COLLECTION→WAITING transition:
+    deal.sideAState.locks = {};  ← Clear locks
+    deal.sideBState.locks = {};  ← Clear locks
+
+Then WAITING stage naturally re-checks with minConf=6 when locks are next
+checked (every cycle).
+
+OPTION B (Explicit):
+In WAITING stage, add explicit re-check:
+    if (deal.stage === 'WAITING') {
+        // Get fresh lock status with minConf=6
+        locksA = checkLocks(..., lockMinConfA=6, ...);
+        locksB = checkLocks(..., lockMinConfB=6, ...);
+
+        if (locksA.valid && locksB.valid) {
+            // Safe to transition
+        }
+    }
+
+
+SUMMARY
+================================================================================
+
+The bug is a FLOW LOGIC ERROR, not a CONFIGURATION ERROR:
+
+  Configuration:     ✓ Correctly set (6 confirmations required)
+  Plugin methods:    ✓ Correctly implemented (return right values)
+  Lock checking:     ✓ Correctly done (uses right minConf per stage)
+
+  Stage transition:  ❌ BROKEN (doesn't clear or re-verify locks)
+
+Result: Locks set in COLLECTION stage (minConf=2) bypass WAITING stage
+validation (minConf=6) and allow premature SWAP execution.
+
+Severity: CRITICAL - Security/finality issue
+
+Fix time: 5-10 minutes (Option A) or 20-30 minutes (Option B)
+
+================================================================================

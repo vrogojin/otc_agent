@@ -1,0 +1,61 @@
+# Dependencies (will be installed fresh in container)
+node_modules
+packages/*/node_modules
+
+# Build artifacts (will be built in container)
+packages/*/dist
+
+# Logs and data (mounted as volumes)
+*.log
+logs/
+data/
+packages/backend/data/
+
+# Git
+.git
+.gitignore
+
+# Environment files (mounted separately)
+.env
+.env.backup.*
+.env.production
+
+# Documentation
+*.md
+docs/
+ref_materials/
+
+# Contracts (not needed for backend)
+contracts/
+
+# Backups
+backups/
+
+# SSL (mounted as volume)
+.ssl/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test files and utilities
+*.test.ts
+*.spec.ts
+test/
+packages/playwright-jsonrpc/
+
+# Root-level scripts and analysis files
+*.js
+*.mjs
+*.sh
+!packages/**/*.js
+
+# Claude and other AI assistant files
+.claude/
+
+# Misc
+*.html
+*.json.backup
+gas-analysis-output/

@@ -1,0 +1,173 @@
+================================================================================
+SMOKING GUN FOUND: Confirmation Threshold Bypass in WAITING Stage
+================================================================================
+
+ALERT: Deal d15edb162d273f4f7bdac8dfc2ffb91f transitioned WAITING→SWAP at 4 
+confirmations when .env configured UNICITY_CONFIRMATIONS=6.
+
+================================================================================
+ROOT CAUSE (THE SMOKING GUN)
+================================================================================
+
+File: /home/vrogojin/otc_agent/packages/backend/src/engine/Engine.ts
+Lines: 275-322 (WAITING stage processing)
+
+The bug is NOT in configuration or plugin code. It's in the Engine's stage 
+transition logic:
+
+  } else if (deal.stage === 'WAITING') {
+    await this.updateDeposits(deal);
+
+    // ❌ WRONG: Only checks if locks EXIST
+    // ❌ WRONG: Does NOT verify locks were set with correct minConf
+    const sideALocked = deal.sideAState?.locks.tradeLockedAt && 
+                       deal.sideAState?.locks.commissionLockedAt;
+    const sideBLocked = deal.sideBState?.locks.tradeLockedAt && 
+                       deal.sideBState?.locks.commissionLockedAt;
+
+    if (sideALocked && sideBLocked) {
+      // ❌ TRANSITION HAPPENS HERE with NO RE-VERIFICATION
+      // Locks may have been set in COLLECTION with minConf=2
+      // But we need minConf=6 for WAITING stage!
+      await this.buildTransferPlan(deal);
+      this.dealRepo.updateStage(deal.id, 'SWAP');  // ← BUG!
+    }
+  }
+
+================================================================================
+HOW THE BUG MANIFESTS
+================================================================================
+
+Timeline:
+---------
+
+STAGE 1 - COLLECTION (minConf=2):
+  T0: Deal enters COLLECTION stage
+  T1: Both sides deposit with 2 confirmations
+  T2: Lock check runs: minConf = getCollectConfirms() = 2
+  T3: Result: aliceLockReady = true, bobLockReady = true
+  T4: Locks are SET in sideAState and sideBState
+      → deal.sideAState.locks = { tradeLockedAt: X, commissionLockedAt: X }
+      → deal.sideBState.locks = { tradeLockedAt: X, commissionLockedAt: X }
+
+STAGE 2 - TRANSITION COLLECTION→WAITING:
+  T5: Deal transitions to WAITING stage
+  T6: Line 254: this.dealRepo.updateStage(deal.id, 'WAITING')
+  T7: Locks are NOT cleared at transition (CRITICAL BUG)
+
+STAGE 3 - WAITING (minConf=6):
+  T8: Engine processes deal in WAITING stage (next cycle)
+  T9: Line 278: await this.updateDeposits(deal)
+  T10: Line 283-284: Check if locks exist
+       const sideALocked = deal.sideAState?.locks.tradeLockedAt && ...
+       Result: YES (locks were set at T4)
+  T11: Line 293: if (sideALocked && sideBLocked) → TRUE
+  T12: Line 306: this.dealRepo.updateStage(deal.id, 'SWAP')
+       → PREMATURE TRANSITION!
+
+STAGE 4 - SWAP:
+  T13: Deal executes swap
+  T14: Actual confirmations may only be 2-4, not 6!
+  T15: Security bypassed!
+
+================================================================================
+EVIDENCE
+================================================================================
+
+Configuration is CORRECT:
+  ✓ .env line 52: UNICITY_CONFIRMATIONS=6
+  ✓ .env line 53: UNICITY_COLLECT_CONFIRMS=2
+  ✓ index.ts lines 81-82: Both values parsed correctly
+  ✓ UnicityPlugin lines 748-754: Methods return correct values
+
+Plugin Implementation is CORRECT:
+  ✓ getCollectConfirms() returns config.collectConfirms || config.confirmations
+  ✓ getConfirmationThreshold() returns config.confirmations
+  ✓ Both methods properly store and use config values
+
+Lock Check Logic is CORRECT (lines 514-516, 653-655):
+  ✓ Uses getCollectConfirms() when stage === COLLECTION
+  ✓ Uses getConfirmationThreshold() when stage !== COLLECTION
+
+THE BUG IS IN ENGINE.TS LINES 275-322:
+  ❌ Does NOT re-verify lock requirements in WAITING stage
+  ❌ Does NOT clear locks at stage transition
+  ❌ Trusts locks set in COLLECTION even in WAITING
+  ❌ Transitions to SWAP based on lock EXISTENCE, not lock VALIDITY
+
+================================================================================
+IMPACT
+================================================================================
+
+SEVERITY: CRITICAL - Security bypass
+
+All UNICITY deals where COLLECT_CONFIRMS < CONFIRMATIONS are vulnerable:
+  - Current config: COLLECT_CONFIRMS=2, CONFIRMATIONS=6
+  - Risk: Deals execute swaps with 2 confirmations instead of 6
+  - Exposure to reorg attacks during confirmation period
+  - Potential loss of funds if blockchain reorg occurs
+
+Number of potentially affected deals: Unknown (need database scan)
+
+================================================================================
+THE FIX
+================================================================================
+
+OPTION A (Recommended - Simple):
+  Clear locks at COLLECTION→WAITING transition so they're re-verified 
+  with correct minConf.
+  
+  Location: Engine.ts lines 254-259
+  Change:   Add "deal.sideAState.locks = {}; deal.sideBState.locks = {};"
+  Impact:   2 lines of code, leverages existing validation
+
+OPTION B (Robust):
+  Explicitly re-verify lock requirements in WAITING stage with minConf=6
+  
+  Location: Engine.ts lines 275-322
+  Change:   Replace lock check with re-verification logic
+  Impact:   ~40 lines of code, more explicit validation
+
+See FIX_CONFIRMATION_BUG.md for detailed implementation
+
+================================================================================
+VERIFICATION
+================================================================================
+
+Quick Check - Search for this bug:
+  grep -n "deal.stage === 'WAITING'" /home/vrogojin/otc_agent/packages/backend/src/engine/Engine.ts
+
+  Should see around line 275 the buggy code that doesn't re-verify locks
+
+Confirmation Check:
+  1. Deploy deal with UNICITY_COLLECT_CONFIRMS=2, UNICITY_CONFIRMATIONS=6
+  2. Watch logs for "Calling checkLocks" messages
+  3. In WAITING stage, should see minConf: 6
+  4. Without fix: may see locks already set, transaction happens immediately
+  5. With fix: should wait for 6 confirmations before transition
+
+================================================================================
+FILES INVOLVED
+================================================================================
+
+BUGGY CODE:
+  /home/vrogojin/otc_agent/packages/backend/src/engine/Engine.ts (lines 275-322)
+
+CORRECT CODE (not bugs):
+  /home/vrogojin/otc_agent/packages/backend/src/engine/Engine.ts (lines 514-516, 653-655)
+  /home/vrogojin/otc_agent/packages/chains/src/UnicityPlugin.ts (lines 748-754)
+  /home/vrogojin/otc_agent/packages/backend/src/index.ts (lines 78-85)
+  /home/vrogojin/otc_agent/.env (lines 52-53)
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Review FIX_CONFIRMATION_BUG.md for implementation details
+2. Choose Option A or B for the fix
+3. Create pull request with test case
+4. Test with UNICITY_COLLECT_CONFIRMS=2, UNICITY_CONFIRMATIONS=6
+5. Deploy to production with monitoring
+6. Scan database for deals that may have been affected
+
+================================================================================
