@@ -76,10 +76,19 @@ Creates a new OTC swap deal and returns personal links for both parties.
 {
   dealId: string;      // Unique deal identifier
   dealName: string;    // Human-readable deal name
-  linkA: string;       // Personal link for Alice
-  linkB: string;       // Personal link for Bob
+  aliceToken: string;  // Authentication token for Alice (for API calls)
+  bobToken: string;    // Authentication token for Bob (for API calls)
+  linkA: string;       // Personal link for Alice (contains aliceToken)
+  linkB: string;       // Personal link for Bob (contains bobToken)
 }
 ```
+
+**Important:** The `aliceToken` and `bobToken` are required for:
+- `otc.fillPartyDetails` - to fill party details
+- `otc.cancelDeal` - to cancel the deal
+- `otc.status` - for authenticated status queries
+
+Store these tokens securely for automated deal management.
 
 **Example Request:**
 ```json
@@ -111,6 +120,8 @@ Creates a new OTC swap deal and returns personal links for both parties.
   "result": {
     "dealId": "276ca3d2",
     "dealName": "ALPHA-USDC Swap",
+    "aliceToken": "a7b3c4d5e6f7890abcdef1234567890a",
+    "bobToken": "1234567890abcdef1234567890abcdef",
     "linkA": "https://unicity-swap.dyndns.org/d/276ca3d2/a/a7b3c4d5e6f7890abcdef1234567890a",
     "linkB": "https://unicity-swap.dyndns.org/d/276ca3d2/b/1234567890abcdef1234567890abcdef"
   },
@@ -1059,6 +1070,215 @@ When integrating with the OTC Broker API:
    - [ ] Validate all API responses
    - [ ] Verify escrow addresses match
    - [ ] Confirm transaction hashes on-chain
+
+---
+
+---
+
+## Automated Matchmaking Integration
+
+For building automated matchmaking systems that create deals, manage parties, and handle cancellations programmatically.
+
+### Complete Workflow Example
+
+```bash
+# Step 1: Create deal and capture tokens
+RESPONSE=$(curl -s -X POST https://unicity-swap.dyndns.org/rpc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "otc.createDeal",
+    "params": {
+      "alice": {
+        "asset": "ALPHA",
+        "chainId": "UNICITY",
+        "amount": "10"
+      },
+      "bob": {
+        "asset": "ERC20:0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "chainId": "POLYGON",
+        "amount": "50"
+      },
+      "timeoutSeconds": 3600,
+      "name": "Automated Deal"
+    },
+    "id": 1
+  }')
+
+# Extract dealId and tokens (using jq)
+DEAL_ID=$(echo $RESPONSE | jq -r '.result.dealId')
+ALICE_TOKEN=$(echo $RESPONSE | jq -r '.result.aliceToken')
+BOB_TOKEN=$(echo $RESPONSE | jq -r '.result.bobToken')
+
+echo "Deal ID: $DEAL_ID"
+echo "Alice Token: $ALICE_TOKEN"
+echo "Bob Token: $BOB_TOKEN"
+
+# Step 2: Fill Alice's details (using her token)
+curl -s -X POST https://unicity-swap.dyndns.org/rpc \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"jsonrpc\": \"2.0\",
+    \"method\": \"otc.fillPartyDetails\",
+    \"params\": {
+      \"dealId\": \"$DEAL_ID\",
+      \"token\": \"$ALICE_TOKEN\",
+      \"paybackAddress\": \"alpha1qv003pgutceeewj4fzvpdy58rem3xf6lnlv88ku\",
+      \"recipientAddress\": \"0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1\"
+    },
+    \"id\": 2
+  }"
+
+# Step 3: Fill Bob's details (using his token)
+curl -s -X POST https://unicity-swap.dyndns.org/rpc \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"jsonrpc\": \"2.0\",
+    \"method\": \"otc.fillPartyDetails\",
+    \"params\": {
+      \"dealId\": \"$DEAL_ID\",
+      \"token\": \"$BOB_TOKEN\",
+      \"paybackAddress\": \"0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1\",
+      \"recipientAddress\": \"alpha1qgk5xdwjf8z0mh8v7y6n5x4c3b2a1z0y9x8w7v6\"
+    },
+    \"id\": 3
+  }"
+
+# Step 4: Monitor status
+curl -s -X POST https://unicity-swap.dyndns.org/rpc \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"jsonrpc\": \"2.0\",
+    \"method\": \"otc.status\",
+    \"params\": {
+      \"dealId\": \"$DEAL_ID\"
+    },
+    \"id\": 4
+  }" | jq '.result.stage'
+
+# Step 5: Cancel deal if no match found (only works in CREATED stage)
+curl -s -X POST https://unicity-swap.dyndns.org/rpc \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"jsonrpc\": \"2.0\",
+    \"method\": \"otc.cancelDeal\",
+    \"params\": {
+      \"dealId\": \"$DEAL_ID\",
+      \"token\": \"$ALICE_TOKEN\"
+    },
+    \"id\": 5
+  }"
+```
+
+### JavaScript/Node.js Example
+
+```javascript
+const BASE_URL = 'https://unicity-swap.dyndns.org/rpc';
+
+async function rpc(method, params) {
+  const response = await fetch(BASE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      method,
+      params,
+      id: Date.now()
+    })
+  });
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.result;
+}
+
+// Create deal and store tokens
+async function createDeal(aliceAsset, aliceChain, aliceAmount, bobAsset, bobChain, bobAmount) {
+  const result = await rpc('otc.createDeal', {
+    alice: { asset: aliceAsset, chainId: aliceChain, amount: aliceAmount },
+    bob: { asset: bobAsset, chainId: bobChain, amount: bobAmount },
+    timeoutSeconds: 3600
+  });
+
+  // Store these for later use
+  return {
+    dealId: result.dealId,
+    aliceToken: result.aliceToken,
+    bobToken: result.bobToken
+  };
+}
+
+// Fill party details
+async function fillPartyDetails(dealId, token, paybackAddress, recipientAddress) {
+  return await rpc('otc.fillPartyDetails', {
+    dealId,
+    token,
+    paybackAddress,
+    recipientAddress
+  });
+}
+
+// Cancel deal (requires party token)
+async function cancelDeal(dealId, token) {
+  return await rpc('otc.cancelDeal', { dealId, token });
+}
+
+// Check deal status
+async function getStatus(dealId) {
+  return await rpc('otc.status', { dealId });
+}
+
+// Usage example
+async function matchmakingFlow() {
+  // 1. Create deal
+  const deal = await createDeal('ALPHA', 'UNICITY', '10',
+    'ERC20:0xc2132D05D31c914a87C6611C10748AEb04B58e8F', 'POLYGON', '50');
+
+  console.log('Created deal:', deal.dealId);
+  console.log('Alice token:', deal.aliceToken);
+  console.log('Bob token:', deal.bobToken);
+
+  // 2. Fill party details when users are matched
+  await fillPartyDetails(deal.dealId, deal.aliceToken,
+    'alpha1q...payback', '0x...recipient');
+  await fillPartyDetails(deal.dealId, deal.bobToken,
+    '0x...payback', 'alpha1q...recipient');
+
+  // 3. Monitor status
+  const status = await getStatus(deal.dealId);
+  console.log('Stage:', status.stage);
+
+  // 4. Cancel if needed (only in CREATED stage)
+  if (status.stage === 'CREATED') {
+    await cancelDeal(deal.dealId, deal.aliceToken);
+    console.log('Deal cancelled');
+  }
+}
+```
+
+### Key Points for Matchmaking
+
+1. **Token Storage**: Always store `aliceToken` and `bobToken` from `createDeal` response - you'll need them for all subsequent operations
+
+2. **fillPartyDetails Authentication**:
+   - Use `aliceToken` when filling Alice's details
+   - Use `bobToken` when filling Bob's details
+   - The token must match the party being filled
+
+3. **Cancel Permissions**:
+   - Either party's token can cancel the deal
+   - Only works in `CREATED` stage (before deposits arrive)
+   - If deposits exist, deal follows timeout flow instead
+
+4. **Refund Handling**:
+   - When cancelled via API, refunds are automatic
+   - Engine detects `REVERTED` stage and creates refund queue items
+   - ERC20 refunds go through broker contract
+   - Native asset refunds are direct transfers
+
+5. **Status Polling**:
+   - Poll `otc.status` to track deal progress
+   - Stage flow: `CREATED` → `COLLECTION` → `WAITING` → `SWAP` → `CLOSED`
+   - `REVERTED` indicates timeout or cancellation
 
 ---
 

@@ -310,10 +310,12 @@ export class RpcServer {
     }
     
     const baseUrl = process.env.BASE_URL || 'http://localhost:8080';
-    
+
     return {
       dealId: deal.id,
       dealName: deal.name,
+      aliceToken: tokenA,
+      bobToken: tokenB,
       linkA: `${baseUrl}/d/${deal.id}/a/${tokenA}`,
       linkB: `${baseUrl}/d/${deal.id}/b/${tokenB}`,
     };
@@ -426,22 +428,26 @@ export class RpcServer {
     // Validate addresses
     const sendChain = params.party === 'ALICE' ? deal.alice.chainId : deal.bob.chainId;
     const receiveChain = params.party === 'ALICE' ? deal.bob.chainId : deal.alice.chainId;
-    
+
     const sendPlugin = this.pluginManager.getPlugin(sendChain);
     const receivePlugin = this.pluginManager.getPlugin(receiveChain);
-    
-    if (!sendPlugin.validateAddress(params.paybackAddress)) {
+
+    // Sanitize addresses - remove whitespace and invisible characters
+    const trimmedPayback = params.paybackAddress.trim().replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+    const trimmedRecipient = params.recipientAddress.trim().replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+
+    if (!sendPlugin.validateAddress(trimmedPayback)) {
       throw new Error('Invalid payback address');
     }
-    
-    if (!receivePlugin.validateAddress(params.recipientAddress)) {
+
+    if (!receivePlugin.validateAddress(trimmedRecipient)) {
       throw new Error('Invalid recipient address');
     }
-    
+
     // Update deal
     const details: PartyDetails = {
-      paybackAddress: params.paybackAddress,
-      recipientAddress: params.recipientAddress,
+      paybackAddress: trimmedPayback,
+      recipientAddress: trimmedRecipient,
       email: params.email,
       filledAt: new Date().toISOString(),
       locked: true,
@@ -492,9 +498,9 @@ export class RpcServer {
         stmt.run(
           params.dealId,
           params.party,
-          params.paybackAddress,
-          params.recipientAddress,
-          params.email || null,
+          trimmedPayback,
+          trimmedRecipient,
+          params.email?.trim() || null,
           details.filledAt,
           1, // locked = true
           escrowRef?.address || null,
@@ -3982,7 +3988,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             <div style="background: #fff3cd; padding: 8px; border-radius: 5px; margin: 8px 0; border-left: 4px solid #ffc107;">
               <small style="color: #856404;">⚠️ Must be a valid ${dealInfo.sendChain} address that can receive ${dealInfo.sendAsset}</small>
             </div>
-            <input id="payback" placeholder="Enter your ${dealInfo.sendChain} wallet address" required>
+            <input id="payback" placeholder="Enter your ${dealInfo.sendChain} wallet address" required oninput="sanitizeAddress(this)" onpaste="setTimeout(() => sanitizeAddress(this), 0)">
           </div>
           
           <div class="form-group">
@@ -3991,7 +3997,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             <div style="background: #fff3cd; padding: 8px; border-radius: 5px; margin: 8px 0; border-left: 4px solid #ffc107;">
               <small style="color: #856404;">⚠️ Must be a valid ${dealInfo.receiveChain} address that can receive ${dealInfo.receiveAsset}</small>
             </div>
-            <input id="recipient" placeholder="Enter your ${dealInfo.receiveChain} wallet address" required>
+            <input id="recipient" placeholder="Enter your ${dealInfo.receiveChain} wallet address" required oninput="sanitizeAddress(this)" onpaste="setTimeout(() => sanitizeAddress(this), 0)">
           </div>
           
           <div class="form-group">
@@ -4259,6 +4265,16 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
         let blockchainProviders = {};
         let blockchainQueryCache = {};
         let lastSyncTime = Date.now();
+
+        // Sanitize address input - remove whitespace and invisible characters
+        function sanitizeAddress(input) {
+          let value = input.value.trim();
+          // Remove zero-width spaces, BOM, non-breaking spaces
+          value = value.replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+          if (input.value !== value) {
+            input.value = value;
+          }
+        }
 
         // Typing animation state
         let currentTypingAnimation = null;
@@ -4917,9 +4933,9 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             return;
           }
           
-          const payback = document.getElementById('payback').value;
-          const recipient = document.getElementById('recipient').value;
-          const email = document.getElementById('email').value;
+          const payback = document.getElementById('payback').value.trim();
+          const recipient = document.getElementById('recipient').value.trim();
+          const email = document.getElementById('email').value.trim();
           
           if (!payback || !recipient) {
             alert('Please enter both payback and recipient addresses');

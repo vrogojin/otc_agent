@@ -73,11 +73,13 @@ npm run clean
 
 ### Smart Contract Development (contracts/)
 ```bash
-# Build Solidity contracts
+# Build Solidity contracts (use full path if forge not in PATH)
 cd contracts && forge build
+# Or: cd contracts && ~/.foundry/bin/forge build
 
 # Run contract tests
 forge test
+# Or: ~/.foundry/bin/forge test
 
 # Run with verbosity
 forge test -vv        # Standard
@@ -233,12 +235,18 @@ CREATED → COLLECTION → WAITING → SWAP → CLOSED (or REVERTED)
 
 ### JSON-RPC Server (POST /rpc)
 - `otc.createDeal`: Initialize new deal (optional custom name via `name` param)
-- `otc.fillPartyDetails`: Set party addresses and email
-- `otc.status`: Get deal status
+- `otc.fillPartyDetails`: Set party addresses and email (requires party token)
+- `otc.status`: Get deal status with deposits, transactions, commission details
 - `otc.listDeals`: List deals with filters
 - `otc.listAssets`: Get available assets with chain info and decimals
+- `otc.cancelDeal`: Cancel a deal in CREATED stage (requires party token)
 - `otc.sendInvite`: Send invitation email to party
 - `otc.setPrice`: Manually set oracle price for testing (dev only)
+
+### Admin API (POST /rpc) - Requires authentication
+- `admin.getDashboardStats`: Aggregate statistics for admin dashboard
+- `admin.getDeals`: List deals with pagination and filters
+- `admin.getDealDetails`: Full deal details including queue items
 
 ### Web Interface
 - `/`: Deal creation page
@@ -435,6 +443,13 @@ Database path depends on production mode (determined by `production-config.ts`).
 - WAL files: `*.db-wal`, `*.db-shm` alongside the main database
 - **Note**: The `data/` directory at repo root may contain stale/empty database files
 
+**How to determine which database is active:**
+```bash
+# Check if production mode is active (from process or environment)
+grep -E "isProduction|DB_PATH" packages/backend/src/services/production-config.ts
+# Production mode is determined by NODE_ENV or presence of .env.production markers
+```
+
 ### Log Files
 Production logs are written to `logs/` directory:
 - **Pattern**: `logs/otc-prod-YYYYMMDD-HHMMSS.log`
@@ -493,6 +508,7 @@ npm test packages/backend/test/specific-test.test.ts
 
 Important reference documents in the repository:
 - `ARCHITECTURE.md`: **Start here for detailed system architecture**, data flow diagrams, and component interactions
+- `API_DOCUMENTATION.md`: Complete JSON-RPC API reference with cURL examples and integration scenarios
 - `OTC_BROKER_BIGDOC_v1.0.md`: Original specification document
 - `QUICK_START.md`: Quick setup guide
 - `TODO.md`: Current development tasks and roadmap
@@ -503,3 +519,5 @@ Important reference documents in the repository:
 - `ref_materials/`: Additional reference materials and documentation
 
 For understanding the deal lifecycle state machine, queue processing phases, and lock verification logic in depth, refer to `ARCHITECTURE.md`.
+
+For API integration examples and commission calculations, refer to `API_DOCUMENTATION.md`.
