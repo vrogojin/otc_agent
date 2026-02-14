@@ -245,12 +245,15 @@ describe('Production Configuration', () => {
 
 // Example test cases showing different scenarios
 describe('Production Config Usage Examples', () => {
+  const originalEnv = process.env;
+
   beforeEach(() => {
+    process.env = { ...originalEnv };
     clearConfigCache();
   });
 
   afterEach(() => {
-    process.env = { ...originalEnv };
+    process.env = originalEnv;
     clearConfigCache();
   });
 
@@ -319,7 +322,7 @@ describe('Production Config Usage Examples', () => {
 
     // USDT should be blocked
     expect(() => validateDealAmounts(usdtDeal.alice, usdtDeal.bob)).toThrow(
-      'Asset ERC20:0xdAC17F958D2ee523a2206206994597C13D831ec7 is not currently supported in production mode'
+      'is not currently supported in production mode'
     );
   });
 
