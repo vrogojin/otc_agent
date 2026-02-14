@@ -5,17 +5,12 @@
  */
 
 import express from 'express';
-import cookieParser from 'cookie-parser';
 import { Deal, DealAssetSpec, PartyDetails, DealStage, CommissionMode, CommissionRequirement, EscrowAccountRef, AssetCode, ChainId, getAssetRegistry, formatAssetCode, parseAssetCode, generateDealName, validateDealName, calculateCommission, getAssetMetadata, sumAmounts } from '@otc-broker/core';
 import { DealRepository, QueueRepository, PayoutRepository } from '../db/repositories';
 import { DB } from '../db/database';
 import { PluginManager, ChainPlugin } from '@otc-broker/chains';
 import * as crypto from 'crypto';
 import { EmailService } from '../services/email';
-import { GasPriceOracle } from '../services/GasPriceOracle';
-import * as productionConfig from '../config/production-config';
-import { setupAdminRoutes } from './admin-routes';
-import { validateAmountString } from '../utils/validation';
 
 interface CreateDealParams {
   alice: DealAssetSpec;
@@ -50,10 +45,6 @@ interface SendInviteParams {
   link: string;
 }
 
-interface ListAssetsParams {
-  chainId?: string;  // Optional: filter by specific chain
-}
-
 /**
  * JSON-RPC server that exposes OTC broker functionality via HTTP.
  * Handles deal creation, party management, status queries, and serves web pages.
@@ -79,8 +70,6 @@ export class RpcServer {
   private payoutRepo: PayoutRepository;
   private pluginManager: PluginManager;
   private emailService: EmailService;
-  private gasPriceOracle: GasPriceOracle;
-  private server: any | null = null; // HTTP or HTTPS server instance
 
   // Internal transaction retry cache
   private internalTxCache: Map<string, InternalTxRetryState> = new Map();
@@ -94,40 +83,14 @@ export class RpcServer {
   constructor(private db: DB, pluginManager: PluginManager) {
     this.app = express();
     this.app.use(express.json());
-    this.app.use(cookieParser());
     this.dealRepo = new DealRepository(db);
     this.queueRepo = new QueueRepository(db);
     this.payoutRepo = new PayoutRepository(db);
     this.pluginManager = pluginManager;
     this.emailService = new EmailService(db);
 
-    // Initialize gas price oracle with 12-second cache (1 Ethereum block)
-    // and circuit breakers from environment or defaults
-    this.gasPriceOracle = new GasPriceOracle(
-      parseInt(process.env.GAS_CACHE_TTL_MS || '12000'),
-      {
-        ETH: process.env.MAX_GAS_PRICE_ETH || '500',
-        POLYGON: process.env.MAX_GAS_PRICE_POLYGON || '2000',
-        SEPOLIA: process.env.MAX_GAS_PRICE_SEPOLIA || '1000',
-        BASE: process.env.MAX_GAS_PRICE_BASE || '100',
-        BSC: process.env.MAX_GAS_PRICE_BSC || '100',
-      }
-    );
-
     this.setupRoutes();
-
-    // Setup admin dashboard routes
-    setupAdminRoutes(this.app, db, pluginManager);
-
     this.startRetryWorker();
-  }
-
-  /**
-   * Gets the Express application instance.
-   * Useful for attaching to an external HTTP/HTTPS server.
-   */
-  getApp(): express.Application {
-    return this.app;
   }
 
   /**
@@ -136,8 +99,8 @@ export class RpcServer {
    * Routes include:
    * - POST /rpc - Main JSON-RPC 2.0 endpoint for API calls
    * - GET / - Deal creation page (public)
-   * - GET /d/:dealId/a/:token - Party A (Seller A) personal page
-   * - GET /d/:dealId/b/:token - Party B (Seller B) personal page
+   * - GET /d/:dealId/a/:token - Party A (Alice) personal page
+   * - GET /d/:dealId/b/:token - Party B (Bob) personal page
    *
    * The web pages are served as server-rendered HTML with embedded JavaScript
    * that communicates back to the /rpc endpoint for all data operations.
@@ -172,9 +135,6 @@ export class RpcServer {
           case 'otc.getChainConfig':
             result = await this.getChainConfig(params as { chainId?: string });
             break;
-          case 'otc.listAssets':
-            result = await this.listAssets(params as ListAssetsParams);
-            break;
           default:
             throw new Error(`Method ${method} not found`);
         }
@@ -194,10 +154,6 @@ export class RpcServer {
       res.send(this.renderCreateDealPage());
     });
 
-    this.app.get('/instructions', (req, res) => {
-      res.send(this.renderInstructionsPage());
-    });
-
     this.app.get('/d/:dealId/a/:token', (req, res) => {
       const { dealId, token } = req.params;
       res.send(this.renderPartyPage(dealId, token, 'ALICE'));
@@ -210,15 +166,6 @@ export class RpcServer {
   }
 
   private async createDeal(params: CreateDealParams) {
-    // SECURITY: Validate amount strings first to prevent injection attacks
-    try {
-      validateAmountString(params.alice.amount, 'alice.amount');
-      validateAmountString(params.bob.amount, 'bob.amount');
-    } catch (error: any) {
-      console.warn(`Amount validation failed: ${error.message}`);
-      throw error;
-    }
-
     // Production mode validation - check restrictions before anything else
     const productionConfig = await import('../config/production-config');
 
@@ -310,12 +257,10 @@ export class RpcServer {
     }
     
     const baseUrl = process.env.BASE_URL || 'http://localhost:8080';
-
+    
     return {
       dealId: deal.id,
       dealName: deal.name,
-      aliceToken: tokenA,
-      bobToken: tokenB,
       linkA: `${baseUrl}/d/${deal.id}/a/${tokenA}`,
       linkB: `${baseUrl}/d/${deal.id}/b/${tokenB}`,
     };
@@ -428,26 +373,22 @@ export class RpcServer {
     // Validate addresses
     const sendChain = params.party === 'ALICE' ? deal.alice.chainId : deal.bob.chainId;
     const receiveChain = params.party === 'ALICE' ? deal.bob.chainId : deal.alice.chainId;
-
+    
     const sendPlugin = this.pluginManager.getPlugin(sendChain);
     const receivePlugin = this.pluginManager.getPlugin(receiveChain);
-
-    // Sanitize addresses - remove whitespace and invisible characters
-    const trimmedPayback = params.paybackAddress.trim().replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
-    const trimmedRecipient = params.recipientAddress.trim().replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
-
-    if (!sendPlugin.validateAddress(trimmedPayback)) {
+    
+    if (!sendPlugin.validateAddress(params.paybackAddress)) {
       throw new Error('Invalid payback address');
     }
-
-    if (!receivePlugin.validateAddress(trimmedRecipient)) {
+    
+    if (!receivePlugin.validateAddress(params.recipientAddress)) {
       throw new Error('Invalid recipient address');
     }
-
+    
     // Update deal
     const details: PartyDetails = {
-      paybackAddress: trimmedPayback,
-      recipientAddress: trimmedRecipient,
+      paybackAddress: params.paybackAddress,
+      recipientAddress: params.recipientAddress,
       email: params.email,
       filledAt: new Date().toISOString(),
       locked: true,
@@ -498,9 +439,9 @@ export class RpcServer {
         stmt.run(
           params.dealId,
           params.party,
-          trimmedPayback,
-          trimmedRecipient,
-          params.email?.trim() || null,
+          params.paybackAddress,
+          params.recipientAddress,
+          params.email || null,
           details.filledAt,
           1, // locked = true
           escrowRef?.address || null,
@@ -585,41 +526,9 @@ export class RpcServer {
       const erc20Fee = deal.commissionPlan.sideA.erc20FixedFee || '0';
 
       // For PERCENT_BPS or same-asset commission, include commission + ERC20 fee in the trade amount
-      let totalRequired = deal.commissionPlan.sideA.currency === 'ASSET'
+      const totalRequired = deal.commissionPlan.sideA.currency === 'ASSET'
         ? sumAmounts([deal.alice.amount, commissionAmount, erc20Fee])
         : deal.alice.amount;
-
-      // Add gas/fee buffer for native currency swaps
-      // - EVM chains: escrow pays gas from its own balance for broker swap
-      // - UTXO chains (Unicity): transaction fees consume from UTXO balance
-      const isNative = !deal.alice.asset.startsWith('ERC20:') && !deal.alice.asset.startsWith('SPL:');
-      const isEVM = ['ETH', 'POLYGON', 'BSC', 'BASE', 'SEPOLIA'].includes(deal.alice.chainId);
-      const isUTXO = deal.alice.chainId === 'UNICITY';
-
-      if (isNative && isEVM) {
-        // EVM gas buffer: ~150-200k gas for broker swap
-        // ETH at 30 gwei: 200k × 30 × 10^-9 = 0.006 ETH, with 2x buffer = 0.012 ETH
-        // POLYGON at 100 gwei: 200k × 100 × 10^-9 = 0.02 MATIC, with 2x buffer = 0.04 MATIC
-        const gasBuffers: Record<string, string> = {
-          'ETH': '0.01',      // 0.01 ETH gas buffer (~$25-30 at current prices)
-          'POLYGON': '0.05',  // 0.05 MATIC gas buffer (~$0.05 at current prices)
-          'BSC': '0.01',      // Estimate for BNB
-          'BASE': '0.002',    // Lower for L2
-          'SEPOLIA': '0.01'   // Testnet
-        };
-        const gasBuffer = gasBuffers[deal.alice.chainId] || '0';
-        if (gasBuffer !== '0') {
-          totalRequired = sumAmounts([totalRequired, gasBuffer]);
-          console.log(`[RPC] Adding ${gasBuffer} gas buffer for native ${deal.alice.asset} swap on ${deal.alice.chainId}`);
-        }
-      } else if (isUTXO) {
-        // UTXO fee buffer for Unicity: SWAP_PAYOUT consumes fees before OP_COMMISSION
-        // ~192 satoshis per TX × 2 TXs × 5x safety margin = ~0.00002 ALPHA
-        // Using same value as in invariants.ts checkLocks() function
-        const utxoFeeBuffer = '0.00002';
-        totalRequired = sumAmounts([totalRequired, utxoFeeBuffer]);
-        console.log(`[RPC] Adding ${utxoFeeBuffer} UTXO fee buffer for ${deal.alice.asset} on UNICITY`);
-      }
 
       instructions.sideA.push({
         assetCode: assetCode,
@@ -665,38 +574,9 @@ export class RpcServer {
       const erc20FeeB = deal.commissionPlan.sideB.erc20FixedFee || '0';
 
       // For PERCENT_BPS or same-asset commission, include commission + ERC20 fee in the trade amount
-      let totalRequiredB = deal.commissionPlan.sideB.currency === 'ASSET'
+      const totalRequiredB = deal.commissionPlan.sideB.currency === 'ASSET'
         ? sumAmounts([deal.bob.amount, commissionAmountB, erc20FeeB])
         : deal.bob.amount;
-
-      // Add gas/fee buffer for native currency swaps
-      // - EVM chains: escrow pays gas from its own balance for broker swap
-      // - UTXO chains (Unicity): transaction fees consume from UTXO balance
-      const isNativeB = !deal.bob.asset.startsWith('ERC20:') && !deal.bob.asset.startsWith('SPL:');
-      const isEVMB = ['ETH', 'POLYGON', 'BSC', 'BASE', 'SEPOLIA'].includes(deal.bob.chainId);
-      const isUTXOB = deal.bob.chainId === 'UNICITY';
-
-      if (isNativeB && isEVMB) {
-        // EVM gas buffer
-        const gasBuffers: Record<string, string> = {
-          'ETH': '0.01',      // 0.01 ETH gas buffer (~$25-30 at current prices)
-          'POLYGON': '0.05',  // 0.05 MATIC gas buffer (~$0.05 at current prices)
-          'BSC': '0.01',      // Estimate for BNB
-          'BASE': '0.002',    // Lower for L2
-          'SEPOLIA': '0.01'   // Testnet
-        };
-        const gasBuffer = gasBuffers[deal.bob.chainId] || '0';
-        if (gasBuffer !== '0') {
-          totalRequiredB = sumAmounts([totalRequiredB, gasBuffer]);
-          console.log(`[RPC] Adding ${gasBuffer} gas buffer for native ${deal.bob.asset} swap on ${deal.bob.chainId}`);
-        }
-      } else if (isUTXOB) {
-        // UTXO fee buffer for Unicity: SWAP_PAYOUT consumes fees before OP_COMMISSION
-        // ~192 satoshis per TX × 2 TXs × 5x safety margin = ~0.00002 ALPHA
-        const utxoFeeBuffer = '0.00002';
-        totalRequiredB = sumAmounts([totalRequiredB, utxoFeeBuffer]);
-        console.log(`[RPC] Adding ${utxoFeeBuffer} UTXO fee buffer for ${deal.bob.asset} on UNICITY`);
-      }
 
       instructions.sideB.push({
         assetCode: assetCodeB,
@@ -968,7 +848,7 @@ export class RpcServer {
   }
 
   private async cancelDeal(params: { dealId: string; token: string }) {
-    // Verify token and get deal
+    // Verify token
     const deal = this.dealRepo.get(params.dealId);
     if (!deal) {
       throw new Error('Deal not found');
@@ -979,11 +859,9 @@ export class RpcServer {
       throw new Error('Cannot cancel deal - deal has already started or been finalized');
     }
 
-    // Use updateStage which is transaction-safe (wraps in runInTransaction)
-    // This ensures the stage change is atomically persisted to the database
-    this.dealRepo.updateStage(deal.id, 'REVERTED');
-
-    // Add cancellation-specific event (updateStage already adds "Stage changed to REVERTED")
+    // Update deal stage to REVERTED
+    deal.stage = 'REVERTED';
+    this.dealRepo.update(deal);
     this.dealRepo.addEvent(deal.id, 'Deal cancelled by party');
 
     return { ok: true };
@@ -1067,58 +945,6 @@ export class RpcServer {
     return configs;
   }
 
-  /**
-   * List all trading-enabled assets with full metadata.
-   * Respects PRODUCTION_MODE and ALLOWED_ASSETS filtering.
-   *
-   * @param params - Optional parameters for filtering
-   * @param params.chainId - Optional: filter by specific chain
-   * @returns Object containing assets array, production mode flag, and supported chains
-   */
-  private async listAssets(params: ListAssetsParams = {}) {
-    const registry = getAssetRegistry();
-    const productionConfig = await import('../config/production-config');
-    const isProduction = productionConfig.isProductionMode();
-
-    // Start with all assets
-    let assets = registry.assets;
-
-    // Filter by chain if specified
-    if (params.chainId) {
-      assets = assets.filter(a => a.chainId === params.chainId);
-    }
-
-    // Apply production mode filters
-    if (isProduction) {
-      assets = assets.filter((asset: any) => {
-        const assetCode = formatAssetCode(asset);
-        return productionConfig.isChainAllowed(asset.chainId as ChainId) &&
-               productionConfig.isAssetAllowed(assetCode as AssetCode, asset.chainId as ChainId);
-      });
-    }
-
-    // Format response with full metadata
-    return {
-      assets: assets.map(asset => ({
-        chainId: asset.chainId,
-        assetName: asset.assetName,
-        assetSymbol: asset.assetSymbol,
-        native: asset.native,
-        type: asset.type,
-        contractAddress: asset.contractAddress,
-        decimals: asset.decimals,
-        icon: asset.icon,
-        refundable: asset.refundable,
-        assetCode: formatAssetCode(asset),
-        maxAmount: isProduction ? productionConfig.getMaxAmount(formatAssetCode(asset) as AssetCode) : null
-      })),
-      productionMode: isProduction,
-      chains: registry.supportedChains.filter(chain =>
-        !isProduction || productionConfig.isChainAllowed(chain.chainId as ChainId)
-      )
-    };
-  }
-
   private async sendInviteOld(params: SendInviteParams) {
     // Check if email is enabled in environment
     const emailEnabled = process.env.EMAIL_ENABLED === 'true';
@@ -1171,1168 +997,6 @@ export class RpcServer {
   }
 
   /**
-   * Renders the comprehensive "How to Use" instructions page.
-   *
-   * This page provides detailed guidance for using the Unicity OTC Swap Service including:
-   * - Overview of the service
-   * - Step-by-step guides for Seller A and Seller B
-   * - Deal states explanation
-   * - Timeline expectations
-   * - Security information
-   * - FAQ and troubleshooting
-   *
-   * @returns {string} Complete HTML page with embedded CSS and JavaScript
-   */
-  private renderInstructionsPage(): string {
-    return `
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>How to Use - Unicity OTC Swap</title>
-        <style>
-          * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-          }
-
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            background: #f5f5f5;
-            font-size: 15px;
-          }
-
-          /* Main Navigation */
-          .main-nav {
-            background: white;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            position: sticky;
-            top: 0;
-            z-index: 100;
-          }
-
-          .nav-container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 15px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-          }
-
-          .nav-logo {
-            font-size: 18px;
-            font-weight: 700;
-            color: #667eea;
-          }
-
-          .nav-links {
-            display: flex;
-            gap: 20px;
-            align-items: center;
-          }
-
-          .nav-links a {
-            color: #555;
-            text-decoration: none;
-            font-weight: 500;
-            padding: 8px 16px;
-            border-radius: 6px;
-            transition: all 0.2s;
-            font-size: 14px;
-          }
-
-          .nav-links a:hover {
-            background: #f0f4ff;
-            color: #667eea;
-          }
-
-          /* Hero Section */
-          .hero {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 60px 20px;
-            text-align: center;
-          }
-
-          .hero h1 {
-            font-size: 42px;
-            margin-bottom: 15px;
-            font-weight: 800;
-          }
-
-          .hero p {
-            font-size: 20px;
-            opacity: 0.95;
-            max-width: 700px;
-            margin: 0 auto;
-          }
-
-          /* Section Navigation */
-          .section-nav {
-            background: white;
-            border-bottom: 1px solid #e5e7eb;
-            position: sticky;
-            top: 65px;
-            z-index: 90;
-            overflow-x: auto;
-            white-space: nowrap;
-            -webkit-overflow-scrolling: touch;
-          }
-
-          .section-nav-container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 20px;
-            display: flex;
-            gap: 5px;
-          }
-
-          .section-nav a {
-            display: inline-block;
-            padding: 15px 20px;
-            color: #555;
-            text-decoration: none;
-            font-weight: 500;
-            font-size: 14px;
-            border-bottom: 3px solid transparent;
-            transition: all 0.2s;
-          }
-
-          .section-nav a:hover,
-          .section-nav a.active {
-            color: #667eea;
-            border-bottom-color: #667eea;
-          }
-
-          /* Main Content */
-          .content {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 40px 20px;
-          }
-
-          .section {
-            background: white;
-            border-radius: 10px;
-            padding: 40px;
-            margin-bottom: 30px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-          }
-
-          .section h2 {
-            font-size: 32px;
-            color: #333;
-            margin-bottom: 25px;
-            padding-bottom: 15px;
-            border-bottom: 3px solid #667eea;
-          }
-
-          .section h3 {
-            font-size: 24px;
-            color: #444;
-            margin: 30px 0 15px;
-          }
-
-          .section h4 {
-            font-size: 18px;
-            color: #555;
-            margin: 20px 0 10px;
-          }
-
-          .section p {
-            margin-bottom: 15px;
-            line-height: 1.8;
-          }
-
-          .section ul, .section ol {
-            margin: 15px 0 15px 25px;
-          }
-
-          .section li {
-            margin-bottom: 10px;
-            line-height: 1.7;
-          }
-
-          /* Call-out Boxes */
-          .callout {
-            padding: 20px;
-            border-radius: 8px;
-            margin: 20px 0;
-            border-left: 4px solid;
-          }
-
-          .callout-info {
-            background: #e3f2fd;
-            border-color: #2196F3;
-          }
-
-          .callout-warning {
-            background: #fff3e0;
-            border-color: #FF9800;
-          }
-
-          .callout-success {
-            background: #e8f5e9;
-            border-color: #4CAF50;
-          }
-
-          .callout-tip {
-            background: #f3e5f5;
-            border-color: #9C27B0;
-          }
-
-          .callout-title {
-            font-weight: 700;
-            font-size: 16px;
-            margin-bottom: 10px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-          }
-
-          /* Deal State Badges */
-          .state-badge {
-            display: inline-block;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 13px;
-            color: white;
-            margin: 5px 5px 5px 0;
-          }
-
-          .state-created { background: #2196F3; }
-          .state-collection { background: #FF9800; }
-          .state-waiting { background: #FFC107; color: #333; }
-          .state-swap { background: #9C27B0; }
-          .state-closed { background: #4CAF50; }
-          .state-reverted { background: #F44336; }
-
-          /* Code Blocks */
-          code {
-            background: #f5f5f5;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-family: 'Monaco', 'Consolas', monospace;
-            font-size: 13px;
-            color: #d32f2f;
-          }
-
-          pre {
-            background: #1e1e1e;
-            color: #d4d4d4;
-            padding: 20px;
-            border-radius: 8px;
-            overflow-x: auto;
-            margin: 15px 0;
-          }
-
-          pre code {
-            background: none;
-            color: inherit;
-            padding: 0;
-          }
-
-          /* Tables */
-          table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-          }
-
-          th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #e5e7eb;
-          }
-
-          th {
-            background: #f9fafb;
-            font-weight: 600;
-            color: #555;
-          }
-
-          /* Step Numbers */
-          .step-number {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 32px;
-            height: 32px;
-            background: #667eea;
-            color: white;
-            border-radius: 50%;
-            font-weight: 700;
-            margin-right: 10px;
-          }
-
-          /* Footer */
-          .footer {
-            background: #1e293b;
-            color: white;
-            padding: 40px 20px;
-            text-align: center;
-            margin-top: 60px;
-          }
-
-          .footer h3 {
-            margin-bottom: 15px;
-          }
-
-          .footer a {
-            color: #667eea;
-            text-decoration: none;
-          }
-
-          .footer a:hover {
-            text-decoration: underline;
-          }
-
-          /* Back to Top Button */
-          .back-to-top {
-            position: fixed;
-            bottom: 30px;
-            right: 30px;
-            background: #667eea;
-            color: white;
-            width: 50px;
-            height: 50px;
-            border-radius: 50%;
-            display: none;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            transition: all 0.3s;
-            z-index: 80;
-            font-size: 24px;
-          }
-
-          .back-to-top:hover {
-            background: #5a67d8;
-            transform: translateY(-5px);
-          }
-
-          .back-to-top.show {
-            display: flex;
-          }
-
-          /* Responsive Design */
-          @media (max-width: 768px) {
-            body {
-              font-size: 16px;
-            }
-
-            .hero h1 {
-              font-size: 32px;
-            }
-
-            .hero p {
-              font-size: 18px;
-            }
-
-            .section {
-              padding: 25px 20px;
-            }
-
-            .section h2 {
-              font-size: 26px;
-            }
-
-            .section h3 {
-              font-size: 20px;
-            }
-
-            .nav-links {
-              gap: 10px;
-            }
-
-            .nav-links a {
-              padding: 6px 10px;
-              font-size: 13px;
-            }
-
-            .section-nav {
-              top: 55px;
-            }
-
-            .section-nav a {
-              padding: 12px 15px;
-              font-size: 13px;
-            }
-
-            .back-to-top {
-              width: 44px;
-              height: 44px;
-              bottom: 20px;
-              right: 20px;
-            }
-          }
-
-          /* Smooth Scroll */
-          html {
-            scroll-behavior: smooth;
-          }
-        </style>
-      </head>
-      <body>
-        <!-- Main Navigation -->
-        <nav class="main-nav">
-          <div class="nav-container">
-            <span class="nav-logo">Unicity OTC Swap</span>
-            <div class="nav-links">
-              <a href="/instructions">How to Use</a>
-              <a href="/">Create Deal</a>
-            </div>
-          </div>
-        </nav>
-
-        <!-- Hero Section -->
-        <header class="hero">
-          <h1>How to Use Unicity OTC Swap</h1>
-          <p>Your complete guide to secure, trustless cross-chain asset swaps</p>
-        </header>
-
-        <!-- Section Navigation -->
-        <nav class="section-nav">
-          <div class="section-nav-container">
-            <a href="#overview">Overview</a>
-            <a href="#alice-guide">Seller A's Guide</a>
-            <a href="#bob-guide">Seller B's Guide</a>
-            <a href="#deal-states">Deal States</a>
-            <a href="#timeline">Timeline</a>
-            <a href="#security">Security</a>
-            <a href="#faq">FAQ</a>
-            <a href="#troubleshooting">Troubleshooting</a>
-            <a href="#support">Support</a>
-          </div>
-        </nav>
-
-        <!-- Main Content -->
-        <main class="content">
-          <!-- Overview Section -->
-          <section id="overview" class="section">
-            <h2>What is Unicity OTC Swap?</h2>
-            <p>Unicity OTC Swap is a trustless, non-custodial broker service that enables secure asset exchanges between two parties across different blockchain networks. Unlike traditional exchanges, there are no liquidity pools, order books, or third-party custody—just a direct peer-to-peer swap facilitated by smart escrow mechanisms.</p>
-
-            <h3>How It Works</h3>
-            <p>The service operates with two parties:</p>
-            <ul>
-              <li><strong>Seller A (Asset A Seller):</strong> Wants to sell Asset A and receive Asset B</li>
-              <li><strong>Seller B (Asset B Seller):</strong> Wants to sell Asset B and receive Asset A</li>
-            </ul>
-
-            <div class="callout callout-info">
-              <div class="callout-title">Key Concept</div>
-              <p>Both parties deposit their assets into secure escrow addresses. Once both deposits are confirmed, the broker atomically swaps the assets, ensuring neither party can lose funds without receiving their expected assets.</p>
-            </div>
-
-            <h3>Why Use Unicity OTC Swap?</h3>
-            <ul>
-              <li><strong>Trustless:</strong> No need to trust a counterparty or exchange</li>
-              <li><strong>Non-custodial:</strong> You maintain control until the swap executes</li>
-              <li><strong>Cross-chain:</strong> Swap assets across different blockchains (ETH, Polygon, Unicity, etc.)</li>
-              <li><strong>Transparent:</strong> Track deal status in real-time</li>
-              <li><strong>Fair pricing:</strong> You set your own exchange rates</li>
-            </ul>
-
-            <div class="callout callout-warning">
-              <div class="callout-title">Important Note</div>
-              <p>Always verify deposit addresses before sending funds. The service generates unique escrow addresses for each deal. Double-check you're using the correct address provided on your personal tracking page.</p>
-            </div>
-          </section>
-
-          <!-- Seller A's Guide -->
-          <section id="alice-guide" class="section">
-            <h2>Seller A's Guide: Asset A Seller</h2>
-            <p>As Seller A, you're initiating or participating in a deal where you'll sell Asset A and receive Asset B. Follow these steps:</p>
-
-            <h3>Step 1: Create or Receive a Deal</h3>
-            <p><strong>Option A: Create a new deal</strong></p>
-            <ol>
-              <li>Visit the <a href="/" style="color: #667eea;">Create Deal page</a></li>
-              <li>Select your asset (Asset A) - chain, asset type, and amount</li>
-              <li>Select Seller B's asset (Asset B) - chain, asset type, and amount</li>
-              <li>Set the timeout period (typically 30-60 minutes)</li>
-              <li>Click "Create Deal"</li>
-              <li>Save your personal tracking link (Asset A Seller Link)</li>
-            </ol>
-
-            <p><strong>Option B: Receive an invitation</strong></p>
-            <ol>
-              <li>Seller B creates the deal and shares the Asset A Seller link with you</li>
-              <li>Open your personal tracking link</li>
-            </ol>
-
-            <div class="callout callout-tip">
-              <div class="callout-title">Pro Tip</div>
-              <p>Bookmark your personal tracking link immediately! This is your portal to monitor and interact with the deal. The link contains a secure token unique to your role.</p>
-            </div>
-
-            <h3>Step 2: Fill in Your Details</h3>
-            <ol>
-              <li>Open your personal tracking page (Asset A Seller Link)</li>
-              <li>Enter your receiving address for Asset B (where you want to receive the swapped asset)</li>
-              <li>Optionally enter your email for status notifications</li>
-              <li>Click "Submit Details"</li>
-            </ol>
-
-            <div class="callout callout-warning">
-              <div class="callout-title">Critical: Verify Your Receiving Address</div>
-              <p>Double-check your receiving address! This is where Asset B will be sent after the swap. If you provide an incorrect address, you may lose your swapped assets permanently.</p>
-            </div>
-
-            <h3>Step 3: Wait for Seller B to Submit Details</h3>
-            <p>The deal remains in <span class="state-badge state-created">CREATED</span> state until Seller B also submits their details. Once both parties have submitted:</p>
-            <ul>
-              <li>Deal moves to <span class="state-badge state-collection">COLLECTION</span> state</li>
-              <li>Countdown timer starts (e.g., 30 minutes)</li>
-              <li>Escrow deposit address is revealed</li>
-            </ul>
-
-            <h3>Step 4: Send Your Deposit</h3>
-            <p>Once in <span class="state-badge state-collection">COLLECTION</span> state:</p>
-            <ol>
-              <li>Copy the escrow deposit address shown on your tracking page</li>
-              <li>Send <strong>EXACTLY</strong> the specified amount of Asset A to this address</li>
-              <li>Send in a <strong>single transaction</strong> (don't split into multiple sends)</li>
-              <li>Wait for blockchain confirmations</li>
-            </ol>
-
-            <div class="callout callout-info">
-              <div class="callout-title">About Confirmations</div>
-              <p>Different chains require different confirmation counts:</p>
-              <ul style="margin-top: 10px;">
-                <li><strong>Ethereum:</strong> 3 confirmations (~45 seconds)</li>
-                <li><strong>Polygon:</strong> 64 confirmations (~2-3 minutes)</li>
-                <li><strong>Unicity:</strong> 6 confirmations (~1 minute)</li>
-              </ul>
-            </div>
-
-            <h3>Step 5: Wait for Confirmations</h3>
-            <p>After both you and Seller B deposit funds:</p>
-            <ul>
-              <li>Deal moves to <span class="state-badge state-waiting">WAITING</span> state</li>
-              <li>Countdown timer suspends (you won't lose time during confirmations)</li>
-              <li>System waits for required blockchain confirmations on both deposits</li>
-              <li>Your tracking page shows confirmation progress</li>
-            </ul>
-
-            <h3>Step 6: Automatic Swap Execution</h3>
-            <p>Once both deposits reach required confirmations:</p>
-            <ul>
-              <li>Deal moves to <span class="state-badge state-swap">SWAP</span> state</li>
-              <li>Countdown timer is removed permanently</li>
-              <li>Broker executes the swap automatically</li>
-              <li>Asset B is sent to your receiving address</li>
-              <li>Asset A is sent to Seller B's receiving address</li>
-            </ul>
-
-            <h3>Step 7: Receive Your Assets</h3>
-            <ul>
-              <li>Deal moves to <span class="state-badge state-closed">CLOSED</span> state</li>
-              <li>Check your wallet for the received Asset B</li>
-              <li>Transaction hashes are displayed on your tracking page</li>
-              <li>The swap is complete!</li>
-            </ul>
-
-            <div class="callout callout-success">
-              <div class="callout-title">Success!</div>
-              <p>Congratulations! You've successfully completed a cross-chain OTC swap. Your Asset B should now be in your wallet.</p>
-            </div>
-
-            <h3>What If Something Goes Wrong?</h3>
-            <p>If the deal times out or encounters issues:</p>
-            <ul>
-              <li>Deal moves to <span class="state-badge state-reverted">REVERTED</span> state</li>
-              <li>Your deposit is automatically refunded to your receiving address</li>
-              <li>Check the "Refund Status" section on your tracking page</li>
-            </ul>
-          </section>
-
-          <!-- Seller B's Guide -->
-          <section id="bob-guide" class="section">
-            <h2>Seller B's Guide: Asset B Seller</h2>
-            <p>As Seller B, you're participating in a deal where you'll sell Asset B and receive Asset A. Your process is similar to Seller A's:</p>
-
-            <h3>Step 1: Create or Receive a Deal</h3>
-            <p><strong>Option A: Create a new deal</strong></p>
-            <ol>
-              <li>Visit the <a href="/" style="color: #667eea;">Create Deal page</a></li>
-              <li>Select Seller A's asset (Asset A) - chain, asset type, and amount</li>
-              <li>Select your asset (Asset B) - chain, asset type, and amount</li>
-              <li>Set the timeout period</li>
-              <li>Click "Create Deal"</li>
-              <li>Save your personal tracking link (Asset B Seller Link)</li>
-            </ol>
-
-            <p><strong>Option B: Receive an invitation</strong></p>
-            <ol>
-              <li>Seller A creates the deal and shares the Asset B Seller link with you</li>
-              <li>Open your personal tracking link</li>
-            </ol>
-
-            <h3>Step 2: Fill in Your Details</h3>
-            <ol>
-              <li>Open your personal tracking page (Asset B Seller Link)</li>
-              <li>Enter your receiving address for Asset A (where you want to receive the swapped asset)</li>
-              <li>Optionally enter your email for notifications</li>
-              <li>Click "Submit Details"</li>
-            </ol>
-
-            <div class="callout callout-warning">
-              <div class="callout-title">Critical: Verify Your Receiving Address</div>
-              <p>Ensure your receiving address is correct for the Asset A chain. Cross-chain addresses are different (e.g., Ethereum addresses differ from Unicity addresses).</p>
-            </div>
-
-            <h3>Step 3: Wait for Seller A to Submit Details</h3>
-            <p>Once both parties submit details, the deal moves to <span class="state-badge state-collection">COLLECTION</span> and the countdown begins.</p>
-
-            <h3>Step 4: Send Your Deposit</h3>
-            <ol>
-              <li>Copy the escrow deposit address from your tracking page</li>
-              <li>Send <strong>EXACTLY</strong> the specified amount of Asset B</li>
-              <li>Use a <strong>single transaction</strong></li>
-              <li>Wait for confirmations</li>
-            </ol>
-
-            <h3>Step 5-7: Confirmation, Swap, and Completion</h3>
-            <p>The remaining steps are identical to Seller A's process:</p>
-            <ul>
-              <li><span class="state-badge state-waiting">WAITING</span>: Confirmations in progress</li>
-              <li><span class="state-badge state-swap">SWAP</span>: Broker executing swap</li>
-              <li><span class="state-badge state-closed">CLOSED</span>: Asset A received!</li>
-            </ul>
-
-            <div class="callout callout-tip">
-              <div class="callout-title">Pro Tip for Seller B</div>
-              <p>If you're receiving the deal link from Seller A, verify the amounts are correct before submitting your details. Once you deposit funds, the exchange rate is locked.</p>
-            </div>
-          </section>
-
-          <!-- Deal States -->
-          <section id="deal-states" class="section">
-            <h2>Understanding Deal States</h2>
-            <p>Every deal progresses through a series of states. Understanding these states helps you track progress and know what to expect:</p>
-
-            <table>
-              <thead>
-                <tr>
-                  <th>State</th>
-                  <th>Description</th>
-                  <th>What Happens</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><span class="state-badge state-created">CREATED</span></td>
-                  <td>Deal initialized</td>
-                  <td>Waiting for both Seller A and Seller B to submit their receiving addresses and details</td>
-                </tr>
-                <tr>
-                  <td><span class="state-badge state-collection">COLLECTION</span></td>
-                  <td>Collecting deposits</td>
-                  <td>Countdown timer active. Waiting for both parties to deposit funds to escrow addresses</td>
-                </tr>
-                <tr>
-                  <td><span class="state-badge state-waiting">WAITING</span></td>
-                  <td>Awaiting confirmations</td>
-                  <td>Funds received. Timer suspended. Waiting for blockchain confirmations before executing swap</td>
-                </tr>
-                <tr>
-                  <td><span class="state-badge state-swap">SWAP</span></td>
-                  <td>Executing swap</td>
-                  <td>Timer removed permanently. Broker is transferring assets. This cannot timeout</td>
-                </tr>
-                <tr>
-                  <td><span class="state-badge state-closed">CLOSED</span></td>
-                  <td>Successfully completed</td>
-                  <td>Swap complete! Both parties have received their assets</td>
-                </tr>
-                <tr>
-                  <td><span class="state-badge state-reverted">REVERTED</span></td>
-                  <td>Deal cancelled/timeout</td>
-                  <td>Deal failed or timed out. Deposits are automatically refunded to parties</td>
-                </tr>
-              </tbody>
-            </table>
-
-            <h3>State Transition Flow</h3>
-            <pre><code>CREATED
-   (Both parties submit details)
-COLLECTION
-   (Both parties deposit funds)
-WAITING
-   (Confirmations complete)
-SWAP
-   (Transfers complete)
-CLOSED
-
-Note: Any state can move to REVERTED if timeout occurs or issues arise</code></pre>
-
-            <div class="callout callout-info">
-              <div class="callout-title">Timer Behavior</div>
-              <ul style="margin-top: 10px;">
-                <li><strong>CREATED & COLLECTION:</strong> Timer counts down. If it reaches zero, deal reverts</li>
-                <li><strong>WAITING:</strong> Timer suspends. You don't lose time during confirmations</li>
-                <li><strong>SWAP:</strong> Timer removed permanently. Swap will complete regardless of time</li>
-              </ul>
-            </div>
-          </section>
-
-          <!-- Timeline -->
-          <section id="timeline" class="section">
-            <h2>Expected Timeline</h2>
-            <p>Here's what to expect for timing during each stage of a typical deal:</p>
-
-            <h3>Deal Creation (Instant)</h3>
-            <ul>
-              <li>Creating a deal: &lt;1 second</li>
-              <li>Submitting party details: &lt;1 second</li>
-            </ul>
-
-            <h3>Collection Phase (User-dependent)</h3>
-            <ul>
-              <li>Depends on when both parties deposit</li>
-              <li>Typical timeout setting: 30-60 minutes</li>
-              <li>Best practice: Deposit as soon as deal enters COLLECTION</li>
-            </ul>
-
-            <h3>Confirmation Phase (Blockchain-dependent)</h3>
-            <ul>
-              <li><strong>Ethereum:</strong> 3 confirmations (approximately 45 seconds)</li>
-              <li><strong>Polygon:</strong> 64 confirmations (approximately 2-3 minutes)</li>
-              <li><strong>Unicity:</strong> 6 confirmations (approximately 1 minute)</li>
-              <li><strong>Solana:</strong> 32 confirmations (approximately 20 seconds)</li>
-            </ul>
-
-            <h3>Swap Execution (2-5 minutes)</h3>
-            <ul>
-              <li>Transaction construction: ~30 seconds</li>
-              <li>Broadcasting both transfers: ~30 seconds</li>
-              <li>Waiting for transfer confirmations: 1-4 minutes</li>
-            </ul>
-
-            <h3>Total Typical Duration</h3>
-            <div class="callout callout-success">
-              <div class="callout-title">Typical Complete Swap</div>
-              <p><strong>5-15 minutes</strong> from both deposits being sent to final asset receipt (assuming both parties deposit promptly)</p>
-            </div>
-
-            <div class="callout callout-warning">
-              <div class="callout-title">Plan for Buffer Time</div>
-              <p>Always set your timeout period with enough buffer. Recommended minimums:</p>
-              <ul style="margin-top: 10px;">
-                <li><strong>Fast swaps:</strong> 30 minutes (for active participants)</li>
-                <li><strong>Standard swaps:</strong> 60 minutes (recommended default)</li>
-                <li><strong>Large amounts:</strong> 90-120 minutes (extra caution time)</li>
-              </ul>
-            </div>
-          </section>
-
-          <!-- Security -->
-          <section id="security" class="section">
-            <h2>Security & Best Practices</h2>
-
-            <h3>How Your Funds Are Protected</h3>
-
-            <h4>1. Non-Custodial Design</h4>
-            <p>The broker never takes custody of your funds in a way where they could be stolen:</p>
-            <ul>
-              <li>Escrow addresses are generated deterministically using HD wallets</li>
-              <li>The broker can only execute the swap according to the deal terms</li>
-              <li>If the deal fails, refunds are automatic and mandatory</li>
-            </ul>
-
-            <h4>2. Atomic Swap Guarantee</h4>
-            <p>Once both deposits are confirmed and locked:</p>
-            <ul>
-              <li>The swap will execute atomically (both transfers or neither)</li>
-              <li>Neither party can cancel or withdraw during SWAP state</li>
-              <li>Even if one transfer fails, it will be retried automatically</li>
-            </ul>
-
-            <h4>3. Reorg Protection</h4>
-            <p>The system protects against blockchain reorganizations:</p>
-            <ul>
-              <li>Confirmations are set above typical reorg depths</li>
-              <li>If a reorg invalidates deposits, deal reverts to COLLECTION</li>
-              <li>Timer resumes to give parties time to re-deposit</li>
-            </ul>
-
-            <h3>Best Practices</h3>
-
-            <div class="callout callout-warning">
-              <div class="callout-title">Essential Security Practices</div>
-              <ol style="margin-top: 10px;">
-                <li><strong>Verify deposit addresses:</strong> Always copy from your tracking page, never from external sources</li>
-                <li><strong>Double-check receiving addresses:</strong> One typo could mean permanent loss of funds</li>
-                <li><strong>Use exact amounts:</strong> Send precisely the amount shown. Extra funds may not be credited correctly</li>
-                <li><strong>Single transaction:</strong> Don't split deposits into multiple sends</li>
-                <li><strong>Bookmark your tracking link:</strong> You'll need it to monitor the deal</li>
-                <li><strong>Don't share your tracking token:</strong> Each link contains a secret token. Don't post it publicly</li>
-                <li><strong>Test with small amounts first:</strong> If you're new, try a small swap before large amounts</li>
-                <li><strong>Verify chain compatibility:</strong> Ensure your wallet supports the chains involved</li>
-              </ol>
-            </div>
-
-            <h3>What Could Go Wrong?</h3>
-
-            <table>
-              <thead>
-                <tr>
-                  <th>Issue</th>
-                  <th>Prevention</th>
-                  <th>Resolution</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Wrong deposit address</td>
-                  <td>Always copy from tracking page</td>
-                  <td>Funds may be unrecoverable; contact support</td>
-                </tr>
-                <tr>
-                  <td>Wrong receiving address</td>
-                  <td>Double-check before submitting</td>
-                  <td>Cannot be changed after submission</td>
-                </tr>
-                <tr>
-                  <td>Incorrect deposit amount</td>
-                  <td>Send exact amount shown</td>
-                  <td>May trigger refund if insufficient</td>
-                </tr>
-                <tr>
-                  <td>Deal timeout</td>
-                  <td>Deposit promptly, use adequate timeout</td>
-                  <td>Automatic refund to receiving address</td>
-                </tr>
-                <tr>
-                  <td>Blockchain congestion</td>
-                  <td>Use higher gas, set longer timeout</td>
-                  <td>Wait for confirmations or deal reverts</td>
-                </tr>
-              </tbody>
-            </table>
-          </section>
-
-          <!-- FAQ -->
-          <section id="faq" class="section">
-            <h2>Frequently Asked Questions</h2>
-
-            <h3>General Questions</h3>
-
-            <h4>Q: What chains are supported?</h4>
-            <p>A: Currently supported chains include:</p>
-            <ul>
-              <li><strong>Unicity PoW</strong> (mandatory - at least one side must be Unicity)</li>
-              <li><strong>Ethereum</strong> (Mainnet and Sepolia testnet)</li>
-              <li><strong>Polygon</strong></li>
-              <li><strong>Base</strong></li>
-              <li>Additional chains can be added by the operator</li>
-            </ul>
-
-            <h4>Q: What's the minimum/maximum swap amount?</h4>
-            <p>A: Limits depend on the specific deployment configuration. Check the deal creation page for current limits. Production deployments typically enforce reasonable minimums to ensure swaps are economically viable after gas costs.</p>
-
-            <h4>Q: Can I cancel a deal?</h4>
-            <p>A: Not directly once you've deposited, but:</p>
-            <ul>
-              <li>In <strong>CREATED</strong> state: Simply don't proceed (no funds involved)</li>
-              <li>In <strong>COLLECTION</strong> state: Wait for timeout and receive automatic refund</li>
-              <li>In <strong>WAITING/SWAP</strong> states: Cannot cancel (funds are locked for swap)</li>
-              <li>In <strong>REVERTED</strong> state: Refund is automatic</li>
-            </ul>
-
-            <h4>Q: What happens if only I deposit?</h4>
-            <p>A: If the other party doesn't deposit before timeout:</p>
-            <ul>
-              <li>Deal enters REVERTED state</li>
-              <li>Your deposit is automatically refunded to your receiving address</li>
-            </ul>
-
-            <h4>Q: Can I do multiple swaps simultaneously?</h4>
-            <p>A: Yes! Each deal is independent. You can participate in multiple deals at the same time, each with its own tracking link.</p>
-
-            <h3>Technical Questions</h3>
-
-            <h4>Q: What if there's a blockchain reorg?</h4>
-            <p>A: The system handles reorgs gracefully:</p>
-            <ul>
-              <li>If a reorg happens before locking: Deal reverts from WAITING back to COLLECTION</li>
-              <li>Timer resumes to give parties time to re-deposit</li>
-              <li>After locking: Reorgs are extremely unlikely due to confirmation depths</li>
-            </ul>
-
-            <h4>Q: What are "confirmations"?</h4>
-            <p>A: Confirmations are the number of blocks added after your transaction block. More confirmations = more security against reorgs. Each chain has different confirmation requirements based on its security model.</p>
-
-            <h4>Q: Why did my transaction fail with "insufficient gas"?</h4>
-            <p>A: For EVM chains, you need native currency for gas:</p>
-            <ul>
-              <li>Sending ETH on Ethereum: Need extra ETH for gas</li>
-              <li>Sending USDT on Polygon: Need MATIC for gas</li>
-              <li>The escrow address may be funded with gas automatically (depends on configuration)</li>
-            </ul>
-
-            <h4>Q: What is the "tank wallet"?</h4>
-            <p>A: Some deployments use a "tank wallet" to automatically fund escrow addresses with gas for EVM chains. This is transparent to users—if enabled, the operator's tank pays for your gas and gets refunded after successful swaps.</p>
-
-            <h3>Troubleshooting Questions</h3>
-
-            <h4>Q: My deposit isn't showing up. What do I do?</h4>
-            <p>A: Check the following:</p>
-            <ol>
-              <li>Verify transaction was confirmed on-chain (use block explorer)</li>
-              <li>Ensure you sent to the correct escrow address</li>
-              <li>Confirm you sent the exact amount required</li>
-              <li>Wait for required confirmations (shown on tracking page)</li>
-              <li>If still not showing after confirmations, contact support with transaction hash</li>
-            </ol>
-
-            <h4>Q: The countdown timer hit zero. What happens?</h4>
-            <p>A: Deal enters REVERTED state:</p>
-            <ul>
-              <li>All deposits are automatically refunded</li>
-              <li>Check "Refund Status" section on your tracking page</li>
-              <li>Refunds go to the receiving address you specified</li>
-            </ul>
-
-            <h4>Q: Can I get help with a stuck deal?</h4>
-            <p>A: Yes! Contact support with:</p>
-            <ul>
-              <li>Your deal ID (shown on tracking page)</li>
-              <li>Current deal state</li>
-              <li>Your role (Seller A or Seller B)</li>
-              <li>Description of the issue</li>
-              <li>Transaction hashes if applicable</li>
-            </ul>
-          </section>
-
-          <!-- Troubleshooting -->
-          <section id="troubleshooting" class="section">
-            <h2>Troubleshooting Common Issues</h2>
-
-            <h3>Issue: Can't Access My Tracking Page</h3>
-            <p><strong>Symptoms:</strong> Lost my tracking link or it doesn't work</p>
-            <p><strong>Solutions:</strong></p>
-            <ul>
-              <li>Check browser history for the tracking URL</li>
-              <li>Search email for invitation with the link</li>
-              <li>If you know the deal ID and your token, reconstruct URL: <code>/d/{dealId}/a/{token}</code> or <code>/d/{dealId}/b/{token}</code></li>
-              <li>Contact support with any deal information you have</li>
-            </ul>
-
-            <h3>Issue: "Submit Details" Button Doesn't Work</h3>
-            <p><strong>Symptoms:</strong> Button is disabled or nothing happens when clicked</p>
-            <p><strong>Solutions:</strong></p>
-            <ul>
-              <li>Ensure you've filled in a valid receiving address for your chain</li>
-              <li>Check browser console for errors (F12 then Console tab)</li>
-              <li>Try a different browser</li>
-              <li>Verify you have internet connectivity</li>
-              <li>Wait a few seconds and try again (might be a temporary network issue)</li>
-            </ul>
-
-            <h3>Issue: Sent Wrong Amount</h3>
-            <p><strong>Symptoms:</strong> Deposited more or less than required amount</p>
-            <p><strong>Solutions:</strong></p>
-            <ul>
-              <li><strong>Less than required:</strong> Deal will likely timeout and refund</li>
-              <li><strong>More than required:</strong> Excess is treated as surplus and may be used for commission or refunded</li>
-              <li><strong>Prevention:</strong> Always send EXACTLY the amount shown</li>
-              <li>Contact support with transaction hash for assistance</li>
-            </ul>
-
-            <h3>Issue: Transaction Not Confirming</h3>
-            <p><strong>Symptoms:</strong> My transaction is stuck "pending"</p>
-            <p><strong>Solutions:</strong></p>
-            <ul>
-              <li><strong>Low gas price:</strong> For EVM chains, you can speed up the transaction by replacing it with higher gas</li>
-              <li><strong>Network congestion:</strong> Wait for congestion to clear</li>
-              <li><strong>Check block explorer:</strong> Verify transaction was actually broadcast</li>
-              <li>If deal times out before confirmation, you'll receive a refund</li>
-            </ul>
-
-            <h3>Issue: Deal Shows REVERTED</h3>
-            <p><strong>Symptoms:</strong> Deal state changed to REVERTED unexpectedly</p>
-            <p><strong>Reasons:</strong></p>
-            <ul>
-              <li>Countdown timer reached zero before both parties deposited</li>
-              <li>One party deposited insufficient amount</li>
-              <li>Blockchain reorg invalidated deposits and timeout occurred</li>
-            </ul>
-            <p><strong>Resolution:</strong></p>
-            <ul>
-              <li>Check "Refund Status" section on tracking page</li>
-              <li>Your deposit will be refunded automatically to your receiving address</li>
-              <li>Wait for refund confirmation (usually within minutes)</li>
-              <li>If refund doesn't arrive, contact support with deal ID</li>
-            </ul>
-
-            <h3>Issue: Refund Not Received</h3>
-            <p><strong>Symptoms:</strong> Deal reverted but refund hasn't arrived</p>
-            <p><strong>Solutions:</strong></p>
-            <ul>
-              <li>Check your receiving address in a block explorer</li>
-              <li>Verify you submitted the correct receiving address initially</li>
-              <li>Wait for network confirmations (may take a few minutes)</li>
-              <li>Check tracking page for refund transaction hash</li>
-              <li>If no refund after 30 minutes, contact support urgently</li>
-            </ul>
-
-            <h3>Issue: Swap Completed but Asset Not in Wallet</h3>
-            <p><strong>Symptoms:</strong> Deal shows CLOSED but I don't see my asset</p>
-            <p><strong>Solutions:</strong></p>
-            <ul>
-              <li><strong>Token not added to wallet:</strong> For ERC-20/SPL tokens, you may need to manually add the token contract to your wallet</li>
-              <li><strong>Check block explorer:</strong> Verify the transfer transaction was confirmed</li>
-              <li><strong>Wrong wallet:</strong> Ensure you're checking the wallet with the receiving address you provided</li>
-              <li><strong>Wallet sync issue:</strong> Try refreshing your wallet or switching networks</li>
-              <li>Copy the payout transaction hash from tracking page and look it up on block explorer</li>
-            </ul>
-
-            <h3>When to Contact Support</h3>
-            <div class="callout callout-warning">
-              <div class="callout-title">Contact Support Immediately If:</div>
-              <ul style="margin-top: 10px;">
-                <li>Funds haven't arrived 30+ minutes after CLOSED state</li>
-                <li>Refund hasn't arrived 30+ minutes after REVERTED state</li>
-                <li>You sent funds to the wrong address</li>
-                <li>The tracking page shows errors or unexpected behavior</li>
-                <li>You suspect any security issue with your deal</li>
-              </ul>
-            </div>
-          </section>
-
-          <!-- Support -->
-          <section id="support" class="section">
-            <h2>Get Support</h2>
-            <p>Need help? We're here to assist you with any issues or questions about your OTC swap.</p>
-
-            <h3>Before Contacting Support</h3>
-            <ol>
-              <li>Check the FAQ and Troubleshooting sections above</li>
-              <li>Gather relevant information:
-                <ul>
-                  <li>Your deal ID</li>
-                  <li>Your role (Seller A or Seller B)</li>
-                  <li>Current deal state</li>
-                  <li>Transaction hashes (if applicable)</li>
-                  <li>Screenshots of any errors</li>
-                </ul>
-              </li>
-              <li>Check your tracking page for status updates</li>
-            </ol>
-
-            <h3>Contact Information</h3>
-            <div class="callout callout-info">
-              <div class="callout-title">Support Channels</div>
-              <p style="margin-top: 10px;">Contact the operator of this Unicity OTC Swap service instance for assistance. Support contact information is typically provided by your service operator.</p>
-              <p style="margin-top: 10px;">When contacting support, include your deal ID and a clear description of your issue.</p>
-            </div>
-
-            <h3>Response Times</h3>
-            <ul>
-              <li><strong>Critical issues</strong> (missing funds, security concerns): Within 1-2 hours</li>
-              <li><strong>High priority</strong> (deal stuck, timeout concerns): Within 4-6 hours</li>
-              <li><strong>General questions</strong> (how-to, clarifications): Within 24 hours</li>
-            </ul>
-
-            <div class="callout callout-tip">
-              <div class="callout-title">Self-Service Resources</div>
-              <p>Most issues can be resolved by:</p>
-              <ul style="margin-top: 10px;">
-                <li>Checking your tracking page for real-time status</li>
-                <li>Verifying transactions on block explorers</li>
-                <li>Reviewing this guide's FAQ and troubleshooting sections</li>
-                <li>Waiting for blockchain confirmations (be patient!)</li>
-              </ul>
-            </div>
-          </section>
-        </main>
-
-        <!-- Footer -->
-        <footer class="footer">
-          <h3>Ready to Get Started?</h3>
-          <p style="margin: 15px 0;">Create your first trustless cross-chain swap today</p>
-          <a href="/" style="display: inline-block; background: #667eea; color: white; padding: 12px 30px; border-radius: 6px; text-decoration: none; font-weight: 600; margin-top: 10px;">Create a Deal</a>
-          <p style="margin-top: 30px; font-size: 14px; opacity: 0.7;">Unicity OTC Swap - Trustless Cross-Chain Asset Swaps</p>
-        </footer>
-
-        <!-- Back to Top Button -->
-        <div class="back-to-top" id="backToTop">^</div>
-
-        <!-- JavaScript for interactions -->
-        <script>
-          // Smooth scroll behavior for navigation
-          document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-            anchor.addEventListener('click', function (e) {
-              e.preventDefault();
-              const target = document.querySelector(this.getAttribute('href'));
-              if (target) {
-                const navHeight = document.querySelector('.main-nav').offsetHeight +
-                                 document.querySelector('.section-nav').offsetHeight;
-                const targetPosition = target.offsetTop - navHeight - 20;
-                window.scrollTo({
-                  top: targetPosition,
-                  behavior: 'smooth'
-                });
-              }
-            });
-          });
-
-          // Back to top button
-          const backToTop = document.getElementById('backToTop');
-          window.addEventListener('scroll', () => {
-            if (window.pageYOffset > 300) {
-              backToTop.classList.add('show');
-            } else {
-              backToTop.classList.remove('show');
-            }
-          });
-
-          backToTop.addEventListener('click', () => {
-            window.scrollTo({
-              top: 0,
-              behavior: 'smooth'
-            });
-          });
-
-          // Highlight active section in navigation
-          const sections = document.querySelectorAll('.section');
-          const navLinks = document.querySelectorAll('.section-nav a');
-
-          function highlightNavigation() {
-            const scrollPosition = window.pageYOffset + 200;
-
-            sections.forEach((section, index) => {
-              const sectionTop = section.offsetTop;
-              const sectionBottom = sectionTop + section.offsetHeight;
-
-              if (scrollPosition >= sectionTop && scrollPosition < sectionBottom) {
-                navLinks.forEach(link => link.classList.remove('active'));
-                if (navLinks[index]) {
-                  navLinks[index].classList.add('active');
-                }
-              }
-            });
-          }
-
-          window.addEventListener('scroll', highlightNavigation);
-          highlightNavigation(); // Initial call
-        </script>
-      </body>
-      </html>
-    `;
-  }
-
-  /**
    * Renders the main deal creation page.
    * This page allows users to create new OTC swap deals by selecting:
    * - Source and destination chains
@@ -2350,62 +1014,14 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
    */
   private renderCreateDealPage(): string {
     const registry = getAssetRegistry();
-    const isProduction = productionConfig.isProductionMode();
-
-    // Filter chains based on production mode
-    let chains = registry.supportedChains;
-    if (isProduction) {
-      chains = chains.filter((chain: any) => productionConfig.isChainAllowed(chain.chainId as ChainId));
-    }
-
-    // Filter assets based on production mode
-    let assets = registry.assets;
-    if (isProduction) {
-      assets = assets.filter((asset: any) => {
-        const assetCode = formatAssetCode(asset);
-        return productionConfig.isChainAllowed(asset.chainId as ChainId) &&
-               productionConfig.isAssetAllowed(assetCode as AssetCode, asset.chainId as ChainId);
-      });
-    }
-
+    const chains = registry.supportedChains;
+    const assets = registry.assets;
+    
     // Group assets by chain for easier access in JavaScript
     const assetsByChain: Record<string, any[]> = {};
     chains.forEach((chain: any) => {
       assetsByChain[chain.chainId] = assets.filter((a: any) => a.chainId === chain.chainId);
     });
-
-    // Defensive filter: Remove chains with zero allowed assets (prevents showing unusable chains)
-    if (isProduction) {
-      chains = chains.filter((chain: any) =>
-        assetsByChain[chain.chainId] && assetsByChain[chain.chainId].length > 0
-      );
-    }
-
-    // Build asset limits map for production mode
-    const assetLimitsMap: Record<string, string> = {};
-    if (isProduction) {
-      const restrictions = productionConfig.getProductionRestrictions();
-      if (restrictions.maxAmounts !== 'NO LIMITS') {
-        const maxAmounts = restrictions.maxAmounts as Record<string, string>;
-
-        // Map assets to their limits
-        // Key format: "ALPHA@UNICITY", "MATIC@POLYGON", "ERC20:0xc2132...@POLYGON"
-        assets.forEach((asset: any) => {
-          const assetCode = formatAssetCode(asset);
-          const fullAssetCode = `${assetCode}@${asset.chainId}`;
-
-          // Check if this asset has a limit
-          // Try by symbol first (for native assets)
-          if (asset.native && maxAmounts[asset.assetSymbol.toUpperCase()]) {
-            assetLimitsMap[fullAssetCode] = `${maxAmounts[asset.assetSymbol.toUpperCase()]} ${asset.assetSymbol}`;
-          }
-          // For ERC20 tokens, check by token symbol (e.g., USDT)
-          else if (asset.type === 'ERC20' && maxAmounts[asset.assetSymbol.toUpperCase()]) {
-            assetLimitsMap[fullAssetCode] = `${maxAmounts[asset.assetSymbol.toUpperCase()]} ${asset.assetSymbol}`;
-          }
-        });
-      }
-    }
 
     return `
       <!DOCTYPE html>
@@ -2413,49 +1029,13 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
       <head>
         <title>Create OTC asset swap deal</title>
         <style>
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
             font-size: 13px;
-            max-width: 500px;
+            max-width: 500px; 
             margin: 10px auto;
             padding: 10px;
             background: #f5f5f5;
-          }
-          /* Main Navigation */
-          .main-nav {
-            background: white;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin: -10px -10px 15px -10px;
-            padding: 12px 15px;
-            border-radius: 6px 6px 0 0;
-          }
-          .nav-container {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-          }
-          .nav-logo {
-            font-size: 14px;
-            font-weight: 700;
-            color: #667eea;
-          }
-          .nav-links {
-            display: flex;
-            gap: 12px;
-            align-items: center;
-          }
-          .nav-links a {
-            color: #555;
-            text-decoration: none;
-            font-weight: 500;
-            padding: 6px 12px;
-            border-radius: 4px;
-            transition: all 0.2s;
-            font-size: 12px;
-          }
-          .nav-links a:hover {
-            background: #f0f4ff;
-            color: #667eea;
           }
           .container {
             background: white;
@@ -2469,18 +1049,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             border-bottom: 1px solid #667eea;
             padding-bottom: 6px;
             margin: 0 0 10px 0;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-          }
-          .dev-badge {
-            background: #f59e0b;
-            color: white;
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.5px;
           }
           h3 {
             font-size: 14px;
@@ -2658,41 +1226,11 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             margin-top: 20px;
             width: 100%;
           }
-          .limit-info {
-            background: #E3F2FD;
-            border: 1px solid #2196F3;
-            border-radius: 4px;
-            padding: 8px 12px;
-            margin-top: 8px;
-            font-size: 12px;
-            color: #1976D2;
-            display: none;
-          }
-          .limit-icon {
-            margin-right: 6px;
-          }
-          .limit-text strong {
-            color: #0D47A1;
-          }
         </style>
       </head>
       <body>
-        <!-- Main Navigation -->
-        <nav class="main-nav">
-          <div class="nav-container">
-            <span class="nav-logo">Unicity OTC Swap</span>
-            <div class="nav-links">
-              <a href="/instructions">How to Use</a>
-              <a href="/">Create Deal</a>
-            </div>
-          </div>
-        </nav>
-
         <div class="container">
-          <h1>
-            <span>Create OTC Asset Swap Deal</span>
-            ${!isProduction ? '<span class="dev-badge">⚠️ DEVELOPMENT</span>' : ''}
-          </h1>
+          <h1>Create OTC Asset Swap Deal</h1>
           
           <!-- Modal for showing deal links -->
           <div id="dealModal" class="modal">
@@ -2776,12 +1314,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                 <div class="form-group">
                   <label for="amountA">Amount</label>
                   <input name="amountA" id="amountA" type="number" step="0.00000001" placeholder="0.00" required>
-
-                  <!-- Limit display for Asset A -->
-                  <div class="limit-info" id="assetALimit">
-                    <span class="limit-icon">ℹ️</span>
-                    <span class="limit-text">Maximum swap amount: <strong id="limitValueA"></strong></span>
-                  </div>
                 </div>
               </div>
               
@@ -2816,12 +1348,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                 <div class="form-group">
                   <label for="amountB">Amount</label>
                   <input name="amountB" id="amountB" type="number" step="0.00000001" placeholder="0.00" required>
-
-                  <!-- Limit display for Asset B -->
-                  <div class="limit-info" id="assetBLimit">
-                    <span class="limit-icon">ℹ️</span>
-                    <span class="limit-text">Maximum swap amount: <strong id="limitValueB"></strong></span>
-                  </div>
                 </div>
               </div>
             </div>
@@ -2842,11 +1368,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
           // Asset registry data
           const assetsByChain = ${JSON.stringify(assetsByChain)};
           const chains = ${JSON.stringify(chains)};
-
-          // Production mode and asset limits
-          const productionMode = ${isProduction};
-          const assetLimits = ${JSON.stringify(assetLimitsMap)};
-
+          
           function updateAssetDropdown(side) {
             const chainSelect = document.getElementById('chain' + side);
             const assetSelect = document.getElementById('asset' + side);
@@ -2933,54 +1455,26 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             const assetSelect = document.getElementById('asset' + side);
             const displayLink = document.getElementById('assetDisplay' + side);
             const selectedOption = assetSelect.options[assetSelect.selectedIndex];
-
+            
             if (selectedOption && selectedOption.dataset.asset) {
               const asset = JSON.parse(selectedOption.dataset.asset);
-
+              
               displayLink.querySelector('.asset-icon').textContent = asset.icon;
               displayLink.querySelector('.asset-name').textContent = asset.assetName;
-
+              
               let details = asset.assetSymbol + ' • ';
               if (asset.native) {
                 details += 'Native Asset';
               } else {
                 details += asset.type;
                 if (asset.contractAddress) {
-                  details += ' • ' + asset.contractAddress.substring(0, 6) + '...' +
+                  details += ' • ' + asset.contractAddress.substring(0, 6) + '...' + 
                             asset.contractAddress.substring(asset.contractAddress.length - 4);
                 }
               }
               displayLink.querySelector('.asset-details').textContent = details;
               displayLink.href = getAssetUrl(asset);
               displayLink.style.display = 'flex';
-
-              // Update limit display
-              updateLimitDisplay(asset, side);
-            }
-          }
-
-          function updateLimitDisplay(asset, side) {
-            const limitElement = document.getElementById('asset' + side + 'Limit');
-            const valueElement = document.getElementById('limitValue' + side);
-
-            // Only show limits in production mode
-            if (!productionMode) {
-              limitElement.style.display = 'none';
-              return;
-            }
-
-            // Build the asset code key: "ALPHA@UNICITY", "ERC20:0xabc...@POLYGON"
-            const assetCode = formatAssetCode(asset);
-            const fullAssetCode = assetCode + '@' + asset.chainId;
-
-            // Check if this asset has a limit
-            const limit = assetLimits[fullAssetCode];
-
-            if (limit) {
-              valueElement.textContent = limit;
-              limitElement.style.display = 'block';
-            } else {
-              limitElement.style.display = 'none';
             }
           }
           
@@ -3143,7 +1637,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
   }
 
   /**
-   * Renders the personal page for a deal party (Seller A or Seller B).
+   * Renders the personal page for a deal party (Alice or Bob).
    * This secure page is accessed via a unique token and provides:
    * - Deal summary and current status
    * - Wallet address collection form (payback and recipient)
@@ -3950,17 +2444,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
       </style>
     </head>
     <body>
-      <!-- Main Navigation -->
-      <nav class="main-nav">
-        <div class="nav-container">
-          <span class="nav-logo">Unicity OTC Swap</span>
-          <div class="nav-links">
-            <a href="/instructions#${party === 'ALICE' ? 'alice-guide' : 'bob-guide'}">How to Use</a>
-            <a href="/">Create Deal</a>
-          </div>
-        </div>
-      </nav>
-
       <div class="container">
         <h1>${partyIcon} ${partyLabel}</h1>
         <p style="color: #333; font-size: 16px; font-weight: 600; margin-top: -10px;">Deal: ${deal?.name || 'Unnamed Deal'}</p>
@@ -3988,7 +2471,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             <div style="background: #fff3cd; padding: 8px; border-radius: 5px; margin: 8px 0; border-left: 4px solid #ffc107;">
               <small style="color: #856404;">⚠️ Must be a valid ${dealInfo.sendChain} address that can receive ${dealInfo.sendAsset}</small>
             </div>
-            <input id="payback" placeholder="Enter your ${dealInfo.sendChain} wallet address" required oninput="sanitizeAddress(this)" onpaste="setTimeout(() => sanitizeAddress(this), 0)">
+            <input id="payback" placeholder="Enter your ${dealInfo.sendChain} wallet address" required>
           </div>
           
           <div class="form-group">
@@ -3997,7 +2480,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             <div style="background: #fff3cd; padding: 8px; border-radius: 5px; margin: 8px 0; border-left: 4px solid #ffc107;">
               <small style="color: #856404;">⚠️ Must be a valid ${dealInfo.receiveChain} address that can receive ${dealInfo.receiveAsset}</small>
             </div>
-            <input id="recipient" placeholder="Enter your ${dealInfo.receiveChain} wallet address" required oninput="sanitizeAddress(this)" onpaste="setTimeout(() => sanitizeAddress(this), 0)">
+            <input id="recipient" placeholder="Enter your ${dealInfo.receiveChain} wallet address" required>
           </div>
           
           <div class="form-group">
@@ -4203,45 +2686,8 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
           from { opacity: 0; transform: translateY(-10px); }
           to { opacity: 1; transform: translateY(0); }
         }
-
+        
         small { font-size: 9px !important; }
-
-        /* Main Navigation */
-        .main-nav {
-          background: white;
-          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-          margin: -30px -20px 20px -20px;
-          padding: 15px 20px;
-          border-radius: 10px 10px 0 0;
-        }
-        .nav-container {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-        }
-        .nav-logo {
-          font-size: 16px;
-          font-weight: 700;
-          color: #667eea;
-        }
-        .nav-links {
-          display: flex;
-          gap: 15px;
-          align-items: center;
-        }
-        .nav-links a {
-          color: #555;
-          text-decoration: none;
-          font-weight: 500;
-          padding: 8px 14px;
-          border-radius: 5px;
-          transition: all 0.2s;
-          font-size: 13px;
-        }
-        .nav-links a:hover {
-          background: #f0f4ff;
-          color: #667eea;
-        }
       </style>
       
       <script>
@@ -4265,16 +2711,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
         let blockchainProviders = {};
         let blockchainQueryCache = {};
         let lastSyncTime = Date.now();
-
-        // Sanitize address input - remove whitespace and invisible characters
-        function sanitizeAddress(input) {
-          let value = input.value.trim();
-          // Remove zero-width spaces, BOM, non-breaking spaces
-          value = value.replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
-          if (input.value !== value) {
-            input.value = value;
-          }
-        }
 
         // Typing animation state
         let currentTypingAnimation = null;
@@ -4694,14 +3130,11 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             let confirmedBalance = 0;
             let unconfirmedBalance = 0;
             const utxoList = [];
-
+            
             if (Array.isArray(utxos)) {
               for (const utxo of utxos) {
-                // CRITICAL: utxo.value may come as number or bigint from Electrum
-                // Convert to bigint safely, then to number for ALPHA calculation
-                const valueSatoshis = typeof utxo.value === 'bigint' ? utxo.value : BigInt(utxo.value || 0);
-                const valueInAlpha = Number(valueSatoshis) / 100000000;
-
+                const valueInAlpha = (utxo.value || 0) / 100000000;
+                
                 // height 0 means mempool (unconfirmed)
                 if (utxo.height === 0) {
                   unconfirmedBalance += valueInAlpha;
@@ -4933,9 +3366,9 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             return;
           }
           
-          const payback = document.getElementById('payback').value.trim();
-          const recipient = document.getElementById('recipient').value.trim();
-          const email = document.getElementById('email').value.trim();
+          const payback = document.getElementById('payback').value;
+          const recipient = document.getElementById('recipient').value;
+          const email = document.getElementById('email').value;
           
           if (!payback || !recipient) {
             alert('Please enter both payback and recipient addresses');
@@ -5148,26 +3581,20 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             const currentBlock = await provider.getBlockNumber();
             const transactions = [];
             
-            // Try to fetch from Etherscan API V2 (unified endpoint for all chains)
-            let apiUrl = 'https://api.etherscan.io/v2/api';
-            let chainIdNumber;
+            // Try to fetch from Etherscan/Polygonscan API
+            let apiUrl;
             if (chainId === 'POLYGON') {
-              chainIdNumber = 137;
+              apiUrl = 'https://api.polygonscan.com/api';
             } else if (chainId === 'ETH') {
-              chainIdNumber = 1;
+              apiUrl = 'https://api.etherscan.io/api';
             } else if (chainId === 'BASE') {
-              chainIdNumber = 8453;
-            } else if (chainId === 'SEPOLIA') {
-              chainIdNumber = 11155111;
-            } else if (chainId === 'BSC') {
-              chainIdNumber = 56;
+              apiUrl = 'https://api.basescan.org/api';
             }
-
-            if (chainIdNumber) {
+            
+            if (apiUrl) {
               try {
-                // Fetch transaction list for the address using V2 API
+                // Fetch transaction list for the address
                 const params = new URLSearchParams({
-                  chainid: chainIdNumber.toString(),
                   module: 'account',
                   action: 'txlist',
                   address: address,
@@ -5175,7 +3602,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                   endblock: currentBlock.toString(),
                   sort: 'desc'
                 });
-
+                
                 // Note: Some networks may require an API key for V2 endpoints
                 // For now, we'll try without an API key and handle errors gracefully
                 const response = await fetch(\`\${apiUrl}?\${params.toString()}\`);
@@ -5745,20 +4172,8 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
             const erc20Fee = parseFloat(yourCommission.erc20FixedFee || '0');
             const totalAmount = parseFloat(escrowAmount);
 
-            // Calculate gas buffer for native EVM currency swaps
-            const isNative = !escrowAsset.includes('ERC20:') && !escrowAsset.includes('SPL:');
-            const isEVM = ['ETH', 'POLYGON', 'BSC', 'BASE', 'SEPOLIA'].includes(escrowChainId);
-            const gasBuffers = {
-              'ETH': 0.01,
-              'POLYGON': 0.05,
-              'BSC': 0.01,
-              'BASE': 0.002,
-              'SEPOLIA': 0.01
-            };
-            const gasBuffer = (isNative && isEVM) ? (gasBuffers[escrowChainId] || 0) : 0;
-
-            // Only show breakdown if there are fees or gas buffer
-            if (commissionAmount > 0 || erc20Fee > 0 || gasBuffer > 0) {
+            // Only show breakdown if there are fees
+            if (commissionAmount > 0 || erc20Fee > 0) {
               let breakdownHtml = '';
               breakdownHtml += '<div>• Trade Amount: <strong>' + baseAmount.toFixed(6) + ' ' + assetName + '</strong></div>';
               if (commissionAmount > 0) {
@@ -5766,9 +4181,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
               }
               if (erc20Fee > 0) {
                 breakdownHtml += '<div>• ERC20 Gas Fee: <strong>' + erc20Fee.toFixed(6) + ' ' + assetName + '</strong></div>';
-              }
-              if (gasBuffer > 0) {
-                breakdownHtml += '<div>• Gas Buffer (for swap execution): <strong>' + gasBuffer.toFixed(6) + ' ' + assetName + '</strong></div>';
               }
               breakdownHtml += '<div style="margin-top: 4px; padding-top: 4px; border-top: 1px solid #f59e0b;">• <strong>Total Required: ' + totalAmount.toFixed(6) + ' ' + assetName + '</strong></div>';
 
@@ -5788,7 +4200,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                   document.getElementById('escrowAmount').textContent = escrowAmount + ' ' + symbol + ' on ' + chainDisplayName;
 
                   // Update fee breakdown with correct symbol
-                  if (commissionAmount > 0 || erc20Fee > 0 || gasBuffer > 0) {
+                  if (commissionAmount > 0 || erc20Fee > 0) {
                     let breakdownHtml = '';
                     breakdownHtml += '<div>• Trade Amount: <strong>' + baseAmount.toFixed(6) + ' ' + symbol + '</strong></div>';
                     if (commissionAmount > 0) {
@@ -5796,9 +4208,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                     }
                     if (erc20Fee > 0) {
                       breakdownHtml += '<div>• ERC20 Gas Fee: <strong>' + erc20Fee.toFixed(6) + ' ' + symbol + '</strong></div>';
-                    }
-                    if (gasBuffer > 0) {
-                      breakdownHtml += '<div>• Gas Buffer (for swap execution): <strong>' + gasBuffer.toFixed(6) + ' ' + symbol + '</strong></div>';
                     }
                     breakdownHtml += '<div style="margin-top: 4px; padding-top: 4px; border-top: 1px solid #f59e0b;">• <strong>Total Required: ' + totalAmount.toFixed(6) + ' ' + symbol + '</strong></div>';
 
@@ -5858,39 +4267,39 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                 return '<strong>Deal initialized - Setup Phase</strong><br>' +
                   '<br><strong>Current Status:</strong> Waiting for both parties to provide wallet addresses<br>' +
                   '<br><strong>Next Steps:</strong><br>' +
-                  '1. Seller A (Asset Seller) needs to submit ' + aliceChain + ' wallet addresses<br>' +
-                  '2. Seller B (Asset Buyer) needs to submit ' + bobChain + ' wallet addresses<br>' +
+                  '1. Alice (Asset Seller) needs to submit ' + aliceChain + ' wallet addresses<br>' +
+                  '2. Bob (Asset Buyer) needs to submit ' + bobChain + ' wallet addresses<br>' +
                   '3. Once both submit, timer will start and collection phase begins<br>' +
                   '4. Both parties will then deposit assets to their escrow addresses';
               } else if (hasAliceDetails && !hasBobDetails) {
                 return '<strong>Partially Ready - Waiting for Party B</strong><br>' +
                   '<br><strong>Current Status:</strong><br>' +
-                  '✅ Seller A (Party A) has submitted wallet addresses<br>' +
-                  '⏳ Waiting for Seller B (Party B) to provide wallet addresses<br>' +
-                  '<br><strong>Seller B needs to submit:</strong><br>' +
+                  '✅ Alice (Party A) has submitted wallet addresses<br>' +
+                  '⏳ Waiting for Bob (Party B) to provide wallet addresses<br>' +
+                  '<br><strong>Bob needs to submit:</strong><br>' +
                   '• Payback address on ' + bobChain + ' (for refunds if deal fails)<br>' +
                   '• Recipient address on ' + aliceChain + ' (to receive ' + aliceAsset + ')<br>' +
                   '<br><strong>What happens next:</strong><br>' +
-                  '1. Seller B needs to open their party link and submit details<br>' +
-                  '2. Once Seller B submits, the 1-hour countdown timer will start<br>' +
+                  '1. Bob needs to open their party link and submit details<br>' +
+                  '2. Once Bob submits, the 1-hour countdown timer will start<br>' +
                   '3. Both parties must then deposit their assets:<br>' +
-                  '   • Seller A will deposit ' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' to ' + aliceChain + ' escrow<br>' +
-                  '   • Seller B will deposit ' + bobExpected.toFixed(4) + ' ' + bobAsset + ' to ' + bobChain + ' escrow<br>' +
+                  '   • Alice will deposit ' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' to ' + aliceChain + ' escrow<br>' +
+                  '   • Bob will deposit ' + bobExpected.toFixed(4) + ' ' + bobAsset + ' to ' + bobChain + ' escrow<br>' +
                   '4. After both fully fund, automatic swap will execute';
               } else if (!hasAliceDetails && hasBobDetails) {
                 return '<strong>Partially Ready - Waiting for Party A</strong><br>' +
                   '<br><strong>Current Status:</strong><br>' +
-                  '✅ Seller B (Party B) has submitted wallet addresses<br>' +
-                  '⏳ Waiting for Seller A (Party A) to provide wallet addresses<br>' +
-                  '<br><strong>Seller A needs to submit:</strong><br>' +
+                  '✅ Bob (Party B) has submitted wallet addresses<br>' +
+                  '⏳ Waiting for Alice (Party A) to provide wallet addresses<br>' +
+                  '<br><strong>Alice needs to submit:</strong><br>' +
                   '• Payback address on ' + aliceChain + ' (for refunds if deal fails)<br>' +
                   '• Recipient address on ' + bobChain + ' (to receive ' + bobAsset + ')<br>' +
                   '<br><strong>What happens next:</strong><br>' +
-                  '1. Seller A needs to open their party link and submit details<br>' +
-                  '2. Once Seller A submits, the 1-hour countdown timer will start<br>' +
+                  '1. Alice needs to open their party link and submit details<br>' +
+                  '2. Once Alice submits, the 1-hour countdown timer will start<br>' +
                   '3. Both parties must then deposit their assets:<br>' +
-                  '   • Seller A will deposit ' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' to ' + aliceChain + ' escrow<br>' +
-                  '   • Seller B will deposit ' + bobExpected.toFixed(4) + ' ' + bobAsset + ' to ' + bobChain + ' escrow<br>' +
+                  '   • Alice will deposit ' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' to ' + aliceChain + ' escrow<br>' +
+                  '   • Bob will deposit ' + bobExpected.toFixed(4) + ' ' + bobAsset + ' to ' + bobChain + ' escrow<br>' +
                   '4. After both fully fund, automatic swap will execute';
               }
               return '<strong>Both parties ready!</strong><br>Transitioning to collection phase...';
@@ -5902,27 +4311,27 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
               if (aliceCollected < aliceExpected && bobCollected < bobExpected) {
                 return '<strong>Collection Phase Active - Both Parties Need to Deposit</strong><br>' +
                   '<br><strong>Current Funding Status:</strong><br>' +
-                  '• Seller A: ' + aliceCollected.toFixed(4) + '/' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' (' + alicePercent + '%) on ' + aliceChain + '<br>' +
-                  '• Seller B: ' + bobCollected.toFixed(4) + '/' + bobExpected.toFixed(4) + ' ' + bobAsset + ' (' + bobPercent + '%) on ' + bobChain + '<br>' +
+                  '• Alice: ' + aliceCollected.toFixed(4) + '/' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' (' + alicePercent + '%) on ' + aliceChain + '<br>' +
+                  '• Bob: ' + bobCollected.toFixed(4) + '/' + bobExpected.toFixed(4) + ' ' + bobAsset + ' (' + bobPercent + '%) on ' + bobChain + '<br>' +
                   '<br><strong>⚠️ Action Required:</strong><br>' +
                   'Both parties must deposit their full amounts to escrow addresses<br>' +
                   '⏱️ Timer is running - complete deposits before expiry!<br>' +
                   '<br><strong>What happens after funding:</strong><br>' +
                   'Once both parties reach 100%, automatic cross-chain swap executes';
               } else if (aliceCollected >= aliceExpected && bobCollected < bobExpected) {
-                return '<strong>Waiting for Seller B - Seller A Fully Funded!</strong><br>' +
+                return '<strong>Waiting for Bob - Alice Fully Funded!</strong><br>' +
                   '<br><strong>Current Status:</strong><br>' +
-                  '✅ Seller A has deposited ' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' on ' + aliceChain + ' (100%)<br>' +
-                  '⏳ Seller B has deposited ' + bobCollected.toFixed(4) + '/' + bobExpected.toFixed(4) + ' ' + bobAsset + ' on ' + bobChain + ' (' + bobPercent + '%)<br>' +
-                  '<br><strong>Seller B needs to deposit:</strong> ' + (bobExpected - bobCollected).toFixed(4) + ' more ' + bobAsset + ' on ' + bobChain + '<br>' +
-                  '<br>Once Seller B completes funding, the swap will execute automatically';
+                  '✅ Alice has deposited ' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' on ' + aliceChain + ' (100%)<br>' +
+                  '⏳ Bob has deposited ' + bobCollected.toFixed(4) + '/' + bobExpected.toFixed(4) + ' ' + bobAsset + ' on ' + bobChain + ' (' + bobPercent + '%)<br>' +
+                  '<br><strong>Bob needs to deposit:</strong> ' + (bobExpected - bobCollected).toFixed(4) + ' more ' + bobAsset + ' on ' + bobChain + '<br>' +
+                  '<br>Once Bob completes funding, the swap will execute automatically';
               } else if (aliceCollected < aliceExpected && bobCollected >= bobExpected) {
-                return '<strong>Waiting for Seller A - Seller B Fully Funded!</strong><br>' +
+                return '<strong>Waiting for Alice - Bob Fully Funded!</strong><br>' +
                   '<br><strong>Current Status:</strong><br>' +
-                  '⏳ Seller A has deposited ' + aliceCollected.toFixed(4) + '/' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' on ' + aliceChain + ' (' + alicePercent + '%)<br>' +
-                  '✅ Seller B has deposited ' + bobExpected.toFixed(4) + ' ' + bobAsset + ' on ' + bobChain + ' (100%)<br>' +
-                  '<br><strong>Seller A needs to deposit:</strong> ' + (aliceExpected - aliceCollected).toFixed(4) + ' more ' + aliceAsset + ' on ' + aliceChain + '<br>' +
-                  '<br>Once Seller A completes funding, the swap will execute automatically';
+                  '⏳ Alice has deposited ' + aliceCollected.toFixed(4) + '/' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' on ' + aliceChain + ' (' + alicePercent + '%)<br>' +
+                  '✅ Bob has deposited ' + bobExpected.toFixed(4) + ' ' + bobAsset + ' on ' + bobChain + ' (100%)<br>' +
+                  '<br><strong>Alice needs to deposit:</strong> ' + (aliceExpected - aliceCollected).toFixed(4) + ' more ' + aliceAsset + ' on ' + aliceChain + '<br>' +
+                  '<br>Once Alice completes funding, the swap will execute automatically';
               } else {
                 // Check if we're waiting for confirmations
                 const sideALocked = dealData.sideAState?.locks?.tradeLockedAt && dealData.sideAState?.locks?.commissionLockedAt;
@@ -5932,8 +4341,8 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                   return '<strong>🎉 Both Parties Fully Funded!</strong><br>' +
                     '<br><strong>Status:</strong> ⏸️ Timer paused - waiting for confirmations<br>' +
                     '<br><strong>Current State:</strong><br>' +
-                    '✅ Seller A has deposited required ' + aliceAsset + ' on ' + aliceChain + '<br>' +
-                    '✅ Seller B has deposited required ' + bobAsset + ' on ' + bobChain + '<br>' +
+                    '✅ Alice has deposited required ' + aliceAsset + ' on ' + aliceChain + '<br>' +
+                    '✅ Bob has deposited required ' + bobAsset + ' on ' + bobChain + '<br>' +
                     '⏳ Waiting for blockchain confirmations<br>' +
                     '<br><strong>Note:</strong> The countdown timer is paused while funds are secured.<br>' +
                     'If a chain reorganization occurs and funds drop below requirements,<br>' +
@@ -6010,15 +4419,15 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                 const isBob = qi.to === dealData.bobDetails?.paybackAddress;
 
                 if (qi.purpose === 'SWAP_PAYOUT') {
-                  return (isAlice ? 'Seller A' : isBob ? 'Seller B' : 'Party') + ' receives';
+                  return (isAlice ? 'Alice' : isBob ? 'Bob' : 'Party') + ' receives';
                 } else if (qi.purpose === 'OP_COMMISSION') {
                   return 'Operator commission';
                 } else if (qi.purpose === 'GAS_REIMBURSEMENT') {
-                  return 'Gas reimbursement to ' + (isAlice ? 'Seller A' : isBob ? 'Seller B' : 'party');
+                  return 'Gas reimbursement to ' + (isAlice ? 'Alice' : isBob ? 'Bob' : 'party');
                 } else if (qi.purpose === 'SURPLUS_REFUND') {
-                  return 'Surplus refund to ' + (isAlice ? 'Seller A' : isBob ? 'Seller B' : 'party');
+                  return 'Surplus refund to ' + (isAlice ? 'Alice' : isBob ? 'Bob' : 'party');
                 } else if (qi.purpose === 'TIMEOUT_REFUND') {
-                  return 'Timeout refund to ' + (isAlice ? 'Seller A' : isBob ? 'Seller B' : 'party');
+                  return 'Timeout refund to ' + (isAlice ? 'Alice' : isBob ? 'Bob' : 'party');
                 } else if (qi.purpose === 'GAS_REFUND_TO_TANK') {
                   return 'Gas tank refund';
                 }
@@ -6098,8 +4507,8 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
               // Otherwise it's a successful swap
               return '<strong>Deal completed successfully!</strong><br>' +
                 'All assets have been swapped and delivered.<br>' +
-                'Seller A received ' + bobExpected.toFixed(4) + ' ' + bobAsset + ' on ' + bobChain + '.<br>' +
-                'Seller B received ' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' on ' + aliceChain + '.';
+                'Alice received ' + bobExpected.toFixed(4) + ' ' + bobAsset + ' on ' + bobChain + '.<br>' +
+                'Bob received ' + aliceExpected.toFixed(4) + ' ' + aliceAsset + ' on ' + aliceChain + '.';
               
             case 'REVERTED':
               return '<strong>Deal cancelled/expired.</strong><br>' +
@@ -6320,10 +4729,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
           let collected = parseFloat(collection?.collectedByAsset?.[assetCode] || '0');
           let liveBalance = null;
 
-          // For vested/unvested assets, we MUST use backend's classified balance
-          // Raw blockchain balance doesn't account for vesting classification
-          const isVestedAsset = assetCode.includes('ALPHA_VESTED') || assetCode.includes('ALPHA_UNVESTED');
-
           if (escrowAddress && chainId) {
             try {
               if (chainId === 'UNICITY') {
@@ -6333,11 +4738,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                   // Only use live balance if we actually got a valid response
                   if (balanceInfo && typeof balanceInfo.total === 'number') {
                     liveBalance = balanceInfo.total;
-                    // For vested/unvested assets, DON'T override with raw balance
-                    // The backend's collectedByAsset has proper vesting classification
-                    if (!isVestedAsset) {
-                      collected = liveBalance; // Only use blockchain data for regular ALPHA
-                    }
+                    collected = liveBalance; // Always use blockchain data
 
                     // Add live indicator
                     const liveIndicator = document.createElement('span');
@@ -6350,23 +4751,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
                     if (existing) existing.remove();
 
                     balanceEl.appendChild(liveIndicator);
-
-                    // Show vesting mismatch warning if escrow has funds but none match vesting requirement
-                    if (isVestedAsset && liveBalance > 0 && collected === 0) {
-                      const vestingWarning = document.createElement('div');
-                      vestingWarning.style.cssText = 'color: #dc2626; font-size: 11px; margin-top: 4px; padding: 4px 8px; background: #fef2f2; border-radius: 4px;';
-                      vestingWarning.innerHTML = '⚠️ ' + liveBalance.toFixed(4) + ' ALPHA in escrow but wrong vesting type';
-                      vestingWarning.id = type + 'VestingWarning';
-                      vestingWarning.title = 'The deposited ALPHA does not match the required vesting classification. It will be refunded when the deal expires.';
-
-                      const existingWarning = document.getElementById(type + 'VestingWarning');
-                      if (existingWarning) existingWarning.remove();
-
-                      balanceEl.parentElement.appendChild(vestingWarning);
-                    } else {
-                      const existingWarning = document.getElementById(type + 'VestingWarning');
-                      if (existingWarning) existingWarning.remove();
-                    }
                   }
 
                   // Show confirmation status if there are unconfirmed funds
@@ -7556,19 +5940,14 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
         return;
       }
 
-      // Estimate gas needed for approval transaction (typically ~50k-70k gas)
-      // Use conservative estimate to handle high gas prices and EIP-1559 priority fees
-      const estimatedGasUnits = '100000'; // Conservative estimate for ERC20 approve
+      // Estimate gas needed for approval transaction (typically ~50k gas)
+      const estimatedGasUnits = '60000'; // Conservative estimate for ERC20 approve
       const gasPrice = await this.getGasPrice(plugin, chainId);
       const gasCostWei = BigInt(estimatedGasUnits) * BigInt(gasPrice);
-      // Use 200% buffer (3x total) to handle gas price volatility and EIP-1559
-      const gasFundAmount = (gasCostWei * BigInt(300)) / BigInt(100);
+      const gasFundAmount = (gasCostWei * BigInt(120)) / BigInt(100); // Add 20% buffer
 
-      // Import ethers for logging
-      const ethers = await import('ethers');
-      console.log(`[Broker] Gas calculation: ${estimatedGasUnits} gas × ${gasPrice} wei × 3.0 buffer = ${gasFundAmount} wei (${ethers.formatEther(gasFundAmount)} MATIC)`);
-      console.log(`[Broker] Funding escrow ${escrow.address} with ${ethers.formatEther(gasFundAmount)} MATIC for approval`);
-      this.dealRepo.addEvent(dealId, `Funding escrow with ${ethers.formatEther(gasFundAmount)} MATIC for broker approval...`);
+      console.log(`[Broker] Funding escrow ${escrow.address} with ${gasFundAmount} wei for approval`);
+      this.dealRepo.addEvent(dealId, `Funding escrow with gas for broker approval...`);
 
       // Fund escrow from tank
       const fundingTx = await this.fundEscrowFromTank(plugin, chainId, escrow.address, gasFundAmount.toString(), tankPrivateKey);
@@ -7596,33 +5975,28 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
   }
 
   /**
-   * Get current gas price for a chain using GasPriceOracle
-   * Returns maxFeePerGas in wei as string
+   * Get current gas price for a chain
    */
   private async getGasPrice(plugin: ChainPlugin, chainId: ChainId): Promise<string> {
     try {
-      // For EVM chains, use gas price oracle with caching and circuit breakers
-      if ((plugin as any).provider) {
-        const provider = (plugin as any).provider;
-        const gasPriceData = await this.gasPriceOracle.getGasPrice(chainId, provider);
-
-        // Return maxFeePerGas (works for both EIP-1559 and legacy chains)
-        console.log(`[Broker] Gas price for ${chainId}: ${(await import('ethers')).formatUnits(gasPriceData.maxFeePerGas, 'gwei')} gwei (source: ${gasPriceData.source})`);
-        return gasPriceData.maxFeePerGas.toString();
-      }
-
-      // For non-EVM chains, use plugin-specific method if available
+      // Use plugin-specific method if available
       if ((plugin as any).getGasPrice) {
         return await (plugin as any).getGasPrice();
       }
 
-      // Final fallback for unsupported chains
-      console.warn(`[Broker] No gas price method available for ${chainId}, using conservative fallback`);
-      return '100000000000'; // 100 gwei
-    } catch (error: any) {
-      console.error(`[Broker] Failed to get gas price for ${chainId}:`, error.message);
-      // Oracle fallback already handles this, but just in case
-      return '100000000000'; // Conservative 100 gwei fallback
+      // Default gas prices by chain (in wei)
+      const defaults: Record<string, string> = {
+        'ETH': '30000000000',      // 30 gwei
+        'SEPOLIA': '10000000000',   // 10 gwei
+        'POLYGON': '50000000000',   // 50 gwei
+        'BASE': '1000000000',       // 1 gwei
+        'BSC': '5000000000',        // 5 gwei
+      };
+
+      return defaults[chainId] || '20000000000'; // Default 20 gwei
+    } catch (error) {
+      console.warn(`[Broker] Failed to get gas price, using default`);
+      return '20000000000'; // 20 gwei default
     }
   }
 
@@ -7661,7 +6035,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
   }
 
   /**
-   * Wait for transaction confirmation with retry logic for RPC errors
+   * Wait for transaction confirmation
    */
   private async waitForTxConfirmation(
     plugin: ChainPlugin,
@@ -7671,8 +6045,6 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
   ): Promise<void> {
     const startTime = Date.now();
     const maxWaitMs = maxWaitSeconds * 1000;
-    let consecutiveNotFoundCount = 0;
-    const maxConsecutiveNotFound = 3; // Only fail after 3 consecutive "not found" results
 
     while (Date.now() - startTime < maxWaitMs) {
       const confirmations = await plugin.getTxConfirmations(txid);
@@ -7682,17 +6054,7 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
       }
 
       if (confirmations < 0) {
-        // Transaction not found - could be RPC issue or actual reorg
-        // Wait for multiple consecutive "not found" before giving up
-        consecutiveNotFoundCount++;
-        console.log(`[TxConfirmation] Transaction ${txid.slice(0, 10)}... not found (attempt ${consecutiveNotFoundCount}/${maxConsecutiveNotFound})`);
-
-        if (consecutiveNotFoundCount >= maxConsecutiveNotFound) {
-          throw new Error(`Transaction ${txid} was reorganized or not found after ${maxConsecutiveNotFound} attempts`);
-        }
-      } else {
-        // Transaction found (pending or partially confirmed) - reset counter
-        consecutiveNotFoundCount = 0;
+        throw new Error(`Transaction ${txid} was reorganized or not found`);
       }
 
       // Wait 5 seconds before checking again
@@ -7860,32 +6222,10 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
     return age < 600000; // 10 minutes
   }
 
-  /**
-   * Starts the RPC server.
-   * Can either create a new HTTP server or attach to an existing server instance.
-   *
-   * @param portOrServer - Port number to create HTTP server, or existing server instance
-   *
-   * @example
-   * // Simple HTTP server
-   * rpcServer.start(8080);
-   *
-   * @example
-   * // HTTPS server
-   * const httpsServer = https.createServer(sslConfig, rpcServer.getApp());
-   * rpcServer.start(httpsServer);
-   */
-  start(portOrServer: number | any): void {
-    if (typeof portOrServer === 'number') {
-      // Create new HTTP server
-      this.server = this.app.listen(portOrServer, () => {
-        console.log(`✓ RPC server listening on port ${portOrServer}`);
-      });
-    } else {
-      // Use existing server instance (HTTP or HTTPS)
-      this.server = portOrServer;
-      console.log('✓ RPC server attached to existing server instance');
-    }
+  start(port: number) {
+    this.app.listen(port, () => {
+      console.log(`RPC server listening on port ${port}`);
+    });
   }
 
   /**
@@ -7893,11 +6233,5 @@ Note: Any state can move to REVERTED if timeout occurs or issues arise</code></p
    */
   stop(): void {
     this.stopRetryWorker();
-
-    if (this.server) {
-      this.server.close(() => {
-        console.log('✓ RPC server stopped');
-      });
-    }
   }
 }
