@@ -10,7 +10,6 @@ services:
     volumes:
       - ./packages/backend/data:/app/packages/backend/data
       - ./logs:/app/packages/backend/logs
-      - ./.ssl:/app/.ssl:ro
       - ./.env.production:/app/.env:ro
     environment:
       - NODE_ENV=production

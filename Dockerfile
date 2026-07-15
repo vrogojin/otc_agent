@@ -40,8 +40,11 @@ COPY --from=builder /app/packages/chains/dist ./packages/chains/dist
 COPY --from=builder /app/packages/chains/package.json ./packages/chains/
 COPY --from=builder /app/packages/backend/dist ./packages/backend/dist
 COPY --from=builder /app/packages/backend/package.json ./packages/backend/
-# Copy schema.sql for database migrations
+# Copy schema.sql and migration files for database migrations
 COPY --from=builder /app/packages/backend/src/db/schema.sql ./packages/backend/src/db/schema.sql
+COPY --from=builder /app/packages/backend/src/db/migrations ./packages/backend/src/db/migrations
+# Copy core config (assets.json)
+COPY --from=builder /app/packages/core/dist/config ./packages/core/dist/config
 COPY package.json ./
 
 # Create directories for runtime
